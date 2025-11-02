@@ -238,7 +238,6 @@ elif "voice" in message:
     text = transcribe_voice(file_url)
 else:
     text = message.get("text", "")
-
     if not message:
         return jsonify({"ok": True})
 
