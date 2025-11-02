@@ -55,7 +55,7 @@ def call_openai_for_json(user_text: str):
             resp = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                max_tokens=500,
+                max_tokens=200,
                 temperature=0.2,
             )
             ai_text = resp.choices[0].message.content.strip()
@@ -64,7 +64,7 @@ def call_openai_for_json(user_text: str):
             resp = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                max_tokens=500,
+                max_tokens=200,
                 temperature=0.2,
             )
             ai_text = resp.choices[0].message["content"].strip()
