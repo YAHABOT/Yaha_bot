@@ -225,6 +225,20 @@ def webhook():
 
     # Telegram may send message or edited_message
     message = data.get("message") or data.get("edited_message")
+    # Check for image or voice note
+if "photo" in message:
+    file_id = message["photo"][-1]["file_id"]
+    file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}").json()
+    file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_info['result']['file_path']}"
+    text = extract_text_from_image(file_url)
+elif "voice" in message:
+    file_id = message["voice"]["file_id"]
+    file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}").json()
+    file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_info['result']['file_path']}"
+    text = transcribe_voice(file_url)
+else:
+    text = message.get("text", "")
+
     if not message:
         return jsonify({"ok": True})
 
