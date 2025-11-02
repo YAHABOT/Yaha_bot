@@ -168,6 +168,51 @@ def send_telegram_message(chat_id: int, text: str) -> bool:
 @app.route("/")
 def index():
     return jsonify({"status": "ok"})
+# ---- OCR + Voice Note Utilities ----
+def extract_text_from_image(file_url: str) -> str:
+    """
+    Uses OCR.Space free API to extract text from an image.
+    You must add your OCR_API_KEY as an environment variable on Render.
+    Get a free key at https://ocr.space/OCRAPI
+    """
+    OCR_API_URL = "https://api.ocr.space/parse/imageurl"
+    OCR_API_KEY = os.getenv("OCR_API_KEY")
+    if not OCR_API_KEY:
+        return "[OCR error] Missing OCR_API_KEY"
+    try:
+        payload = {"apikey": OCR_API_KEY, "url": file_url, "language": "eng"}
+        r = requests.post(OCR_API_URL, data=payload, timeout=20)
+        result = r.json()
+        return result["ParsedResults"][0]["ParsedText"]
+    except Exception as e:
+        logger.exception("OCR failed")
+        return f"[OCR error] {e}"
+
+def transcribe_voice(file_url: str) -> str:
+    """
+    Downloads a Telegram voice note, converts it to WAV, and transcribes it using SpeechRecognition.
+    """
+    try:
+        ogg_data = requests.get(file_url, timeout=15)
+        temp_path = "/tmp/voice.ogg"
+        wav_path = "/tmp/voice.wav"
+
+        with open(temp_path, "wb") as f:
+            f.write(ogg_data.content)
+
+        from pydub import AudioSegment
+        sound = AudioSegment.from_ogg(temp_path)
+        sound.export(wav_path, format="wav")
+
+        import speech_recognition as sr
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(wav_path) as source:
+            audio = recognizer.record(source)
+            text = recognizer.recognize_google(audio)
+        return text
+    except Exception as e:
+        logger.exception("Voice transcription failed")
+        return f"[Voice error] {e}"
 
 
 @app.route("/webhook", methods=["POST"])
