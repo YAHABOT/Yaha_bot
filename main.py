@@ -41,9 +41,42 @@ def call_openai_for_json(user_text: str):
     Returns a tuple (raw_text_response, parsed_json_or_None).
     """
     system_prompt = (
-        "You are a JSON generator. When given a user message, respond ONLY with a valid JSON object and nothing else. "
-        "The JSON must include at least the key \"reply\" with a concise assistant reply. Do not include code fences, markdown, or any extra text."
-    )
+        """
+You are a health tracking assistant. Every message from the user should be converted into a structured JSON object for daily tracking.
+
+Respond ONLY with JSON and no explanations.
+
+If the message is about:
+- sleep or waking up → container = "sleep"
+- workouts or exercise → container = "exercise"
+- food, meals, or calories → container = "food"
+
+Format your JSON like this:
+
+{
+  "container": "sleep | exercise | food",
+  "entry": {
+    "description": "short natural summary",
+    "fields": {
+      "sleep_score": number or null,
+      "energy_score": number or null,
+      "duration": "string or null",
+      "start_time": "HH:MM" or null,
+      "end_time": "HH:MM" or null,
+      "resting_hr": number or null,
+      "workout_name": "string or null",
+      "duration_min": number or null,
+      "calories_burned": number or null,
+      "intensity": "string or null",
+      "items": ["list of foods if any"],
+      "calories": number or null,
+      "protein": number or null,
+      "carbs": number or null,
+      "fat": number or null
+    }
+  }
+}
+"""
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_text},
