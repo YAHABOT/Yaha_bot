@@ -40,8 +40,7 @@ def call_openai_for_json(user_text: str):
     Send the user text to OpenAI and request a strict JSON-only reply.
     Returns a tuple (raw_text_response, parsed_json_or_None).
     """
-    system_prompt = (
-        """
+    system_prompt = """
 You are a health tracking assistant. Every message from the user should be converted into a structured JSON object for daily tracking.
 
 Respond ONLY with JSON and no explanations.
@@ -58,25 +57,26 @@ Format your JSON like this:
   "entry": {
     "description": "short natural summary",
     "fields": {
-      "sleep_score": number or null,
-      "energy_score": number or null,
-      "duration": "string or null",
-      "start_time": "HH:MM" or null,
-      "end_time": "HH:MM" or null,
-      "resting_hr": number or null,
-      "workout_name": "string or null",
-      "duration_min": number or null,
-      "calories_burned": number or null,
-      "intensity": "string or null",
-      "items": ["list of foods if any"],
-      "calories": number or null,
-      "protein": number or null,
-      "carbs": number or null,
-      "fat": number or null
+      "sleep_score": null,
+      "energy_score": null,
+      "duration": null,
+      "start_time": null,
+      "end_time": null,
+      "resting_hr": null,
+      "workout_name": null,
+      "duration_min": null,
+      "calories_burned": null,
+      "intensity": null,
+      "items": [],
+      "calories": null,
+      "protein": null,
+      "carbs": null,
+      "fat": null
     }
   }
 }
 """
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_text},
