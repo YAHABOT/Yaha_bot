@@ -38,7 +38,7 @@ app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # -------------------------------------------------------
-# OCR via OpenAI Vision (flattened schema fix)
+# OCR via OpenAI Vision (object schema fix)
 # -------------------------------------------------------
 def extract_text_from_image(file_url: str) -> str:
     try:
@@ -48,22 +48,25 @@ def extract_text_from_image(file_url: str) -> str:
         img_bytes = resp.content
         b64_image = base64.b64encode(img_bytes).decode("ascii")
 
-        # Flattened structure for vision model
+        # proper OpenAI vision structure
         vision_messages = [
             {
                 "role": "system",
-                "content": "You extract text from screenshots and return ONLY the readable text — no commentary.",
+                "content": (
+                    "You extract text from screenshots. Return only the readable text. "
+                    "Do not describe the image or add commentary."
+                ),
             },
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Extract all visible text content."},
-                    {"type": "image_url", "image_url": f"data:image/jpeg;base64,{b64_image}"}
+                    {"type": "text", "text": "Extract all readable text from this image."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}}
                 ],
             },
         ]
 
-        logger.info("Calling OpenAI Vision...")
+        logger.info("Calling OpenAI Vision for OCR...")
         if openai_client:
             comp = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -118,10 +121,10 @@ def transcribe_voice(file_url):
 def call_openai_for_json(user_text):
     system_prompt = (
         "You are a JSON generator for a health tracking assistant. "
-        "Output only a valid JSON object with: "
+        "Return only a valid JSON object with: "
         "'container' (sleep|exercise|food|user), "
-        "'fields' (dictionary of data points), "
-        "'notes' (string). No markdown or text outside JSON."
+        "'fields' (dictionary of data points), and 'notes' (string). "
+        "Do not include markdown or text outside JSON."
     )
 
     messages = [
@@ -166,7 +169,7 @@ def route_to_container(parsed_json, chat_id):
 
     container = parsed_json["container"]
     fields = parsed_json.get("fields", {})
-    fields["timestamp"] = datetime.utcnow().isoformat()  # Add timestamp
+    fields["timestamp"] = datetime.utcnow().isoformat()
     headers = {
         "apikey": SUPABASE_ANON_KEY,
         "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
@@ -174,7 +177,6 @@ def route_to_container(parsed_json, chat_id):
     }
 
     try:
-        # User weight updates
         if container == "user" and "current_weight_kg" in fields:
             weight = fields["current_weight_kg"]
             requests.patch(
@@ -189,7 +191,6 @@ def route_to_container(parsed_json, chat_id):
             )
             return True
 
-        # Sleep, Exercise, Food
         if container in ["sleep", "exercise", "food"]:
             fields["chat_id"] = chat_id
             requests.post(
@@ -206,7 +207,7 @@ def route_to_container(parsed_json, chat_id):
         return False
 
 # -------------------------------------------------------
-# General Supabase Log (full raw JSON)
+# Supabase Log
 # -------------------------------------------------------
 def log_to_supabase(entry):
     if not SUPABASE_URL or not SUPABASE_ANON_KEY:
@@ -229,7 +230,7 @@ def log_to_supabase(entry):
         return False
 
 # -------------------------------------------------------
-# Telegram Message Sending
+# Telegram Send
 # -------------------------------------------------------
 def send_telegram_message(chat_id, text):
     try:
@@ -260,7 +261,6 @@ def webhook():
     chat = message.get("chat", {}) or {}
     chat_id = chat.get("id")
 
-    # --- Image (OCR) ---
     if "photo" in message:
         file_id = message["photo"][-1]["file_id"]
         file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=15).json()
@@ -271,7 +271,6 @@ def webhook():
         else:
             text = "[OCR error] Missing file path."
 
-    # --- Voice (Speech to text) ---
     elif "voice" in message:
         file_id = message["voice"]["file_id"]
         file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=15).json()
@@ -282,7 +281,6 @@ def webhook():
         else:
             text = "[Voice error] Missing file path."
 
-    # --- Text ---
     else:
         text = message.get("text", "")
 
