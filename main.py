@@ -37,12 +37,12 @@ app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # -------------------------------------------------------
-# OCR via OpenAI Vision (no Google Vision, no MIME games)
+# OCR via OpenAI Vision (fixed schema)
 # -------------------------------------------------------
 def extract_text_from_image(file_url: str) -> str:
     """
     Download image bytes from Telegram, send to OpenAI vision model,
-    and return extracted text. No external OCR API. No MIME roulette.
+    and return extracted text using the 'image_url' input schema.
     """
     try:
         logger.info("Downloading image for OCR...")
@@ -66,11 +66,8 @@ def extract_text_from_image(file_url: str) -> str:
                 "content": [
                     {"type": "text", "text": "Extract all readable text."},
                     {
-                        "type": "input_image",
-                        "image_url": {
-                            # data URL so the model sees the image bytes directly
-                            "url": f"data:image/jpeg;base64,{b64_image}"
-                        },
+                        "type": "image_url",
+                        "image_url": f"data:image/jpeg;base64,{b64_image}",
                     },
                 ],
             },
@@ -227,7 +224,6 @@ def webhook():
 
     # 1) Image -> OCR (OpenAI vision)
     if "photo" in message:
-        # pick largest photo Telegram gives us
         file_id = message["photo"][-1]["file_id"]
         file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=15).json()
         file_path = file_info.get("result", {}).get("file_path")
@@ -255,10 +251,8 @@ def webhook():
     if not chat_id or not text:
         return jsonify({"ok": True})
 
-    # Ask OpenAI to structure into JSON (best effort)
     ai_text, parsed_json = call_openai_for_json(text)
 
-    # Log to Supabase
     entry = {
         "chat_id": str(chat_id),
         "user_message": text,
@@ -268,14 +262,11 @@ def webhook():
     }
     log_to_supabase(entry)
 
-    # Send a short confirmation back
     confirmation = "Received and processed your message."
-    # for images/voice, include a short preview of the extracted text
     if ("photo" in message or "voice" in message) and text:
         preview = (text[:300] + "…") if len(text) > 300 else text
         confirmation = f"OCR/Transcript preview:\n{preview}\n\n" + confirmation
 
-    # add notes if the JSON contains them
     if parsed_json and isinstance(parsed_json, dict) and parsed_json.get("notes"):
         confirmation += f"\nNotes: {parsed_json['notes']}"
 
