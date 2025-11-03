@@ -4,27 +4,27 @@ import json
 import logging
 import requests
 import base64
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 import openai
 from pydub import AudioSegment
 import speech_recognition as sr
 
-# -------------------------------------------------------
-# Logging setup
-# -------------------------------------------------------
+# -------------------------------
+# Logging
+# -------------------------------
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("yaha_bot")
 
-# -------------------------------------------------------
-# Environment variables
-# -------------------------------------------------------
+# -------------------------------
+# Env
+# -------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
+SUPABASE_URL       = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_ANON_KEY  = os.getenv("SUPABASE_ANON_KEY")
 
-# Initialize OpenAI
+# OpenAI client (new SDK if available, else legacy)
 openai_client = None
 if OPENAI_API_KEY:
     try:
@@ -37,23 +37,53 @@ if OPENAI_API_KEY:
 app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# -------------------------------------------------------
-# OCR via OpenAI Vision
-# -------------------------------------------------------
+# -------------------------------
+# Helpers
+# -------------------------------
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def sb_headers():
+    return {
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+
+def sb_post(path, payload):
+    url = f"{SUPABASE_URL}{path}"
+    r = requests.post(url, headers=sb_headers(), json=payload, timeout=15)
+    ok = r.status_code in (200, 201)
+    if not ok:
+        logger.error("Supabase POST failed %s: %s | payload=%s",
+                     r.status_code, r.text, json.dumps(payload)[:4000])
+    return ok, r
+
+def sb_patch(path, payload):
+    url = f"{SUPABASE_URL}{path}"
+    r = requests.patch(url, headers=sb_headers(), json=payload, timeout=15)
+    ok = r.status_code in (200, 201, 204)
+    if not ok:
+        logger.error("Supabase PATCH failed %s: %s | payload=%s",
+                     r.status_code, r.text, json.dumps(payload)[:4000])
+    return ok, r
+
+# -------------------------------
+# OCR (OpenAI Vision)
+# -------------------------------
 def extract_text_from_image(file_url: str) -> str:
     try:
-        logger.info("Downloading image for OCR...")
         resp = requests.get(file_url, timeout=20)
         resp.raise_for_status()
-        img_bytes = resp.content
-        b64_image = base64.b64encode(img_bytes).decode("ascii")
+        b64_image = base64.b64encode(resp.content).decode("ascii")
 
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "You extract text from screenshots of health apps. "
-                    "Return only the readable text, no commentary."
+                    "You extract plain text from screenshots. "
+                    "Return only readable text. No commentary."
                 ),
             },
             {
@@ -65,66 +95,57 @@ def extract_text_from_image(file_url: str) -> str:
             },
         ]
 
-        logger.info("Calling OpenAI Vision for OCR...")
         if openai_client:
             comp = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                max_tokens=1000,
+                max_tokens=1200,
                 temperature=0.0,
             )
-            text = comp.choices[0].message.content.strip()
+            return comp.choices[0].message.content.strip()
         else:
             comp = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                max_tokens=1000,
+                max_tokens=1200,
                 temperature=0.0,
             )
-            text = comp.choices[0].message["content"].strip()
-
-        return text if text else "[No text found in image]"
+            return comp.choices[0].message["content"].strip()
     except Exception as e:
         logger.exception("OCR error")
         return f"[OCR error] {e}"
 
-# -------------------------------------------------------
-# Voice Note Transcription
-# -------------------------------------------------------
+# -------------------------------
+# Voice → text
+# -------------------------------
 def transcribe_voice(file_url):
     try:
-        logger.info("Transcribing voice note...")
-        ogg_data = requests.get(file_url, timeout=30).content
-        temp_ogg = "/tmp/voice.ogg"
-        temp_wav = "/tmp/voice.wav"
+        ogg = requests.get(file_url, timeout=30).content
+        tmp_ogg = "/tmp/voice.ogg"
+        tmp_wav = "/tmp/voice.wav"
+        with open(tmp_ogg, "wb") as f:
+            f.write(ogg)
+        AudioSegment.from_ogg(tmp_ogg).export(tmp_wav, format="wav")
 
-        with open(temp_ogg, "wb") as f:
-            f.write(ogg_data)
-
-        sound = AudioSegment.from_ogg(temp_ogg)
-        sound.export(temp_wav, format="wav")
-
-        recognizer = sr.Recognizer()
-        with sr.AudioFile(temp_wav) as source:
-            audio = recognizer.record(source)
-            text = recognizer.recognize_google(audio)
-
-        return text
+        rec = sr.Recognizer()
+        with sr.AudioFile(tmp_wav) as src:
+            audio = rec.record(src)
+            return rec.recognize_google(audio)
     except Exception as e:
         logger.exception("Voice transcription failed")
         return f"[Voice error] {e}"
 
-# -------------------------------------------------------
-# OpenAI → JSON Structuring (Sleep Fix Included)
-# -------------------------------------------------------
+# -------------------------------
+# LLM → structured JSON
+# -------------------------------
 def call_openai_for_json(user_text):
     system_prompt = (
         "You are a JSON generator for a health tracking assistant. "
-        "Return only a valid JSON object with: "
-        "'container' (sleep|exercise|food|user), "
-        "'fields' (dictionary of data points), and 'notes' (string). "
-        "If 'sleep score' looks like '56 - 35' or '56 ↓ 35', treat 56 as 'sleep_score' "
-        "and -35 as 'sleep_delta'. Do not include markdown or extra text."
+        "Return only a JSON object with keys: "
+        "'container' (one of: sleep, exercise, food, user), "
+        "'fields' (object of data points), "
+        "'notes' (string). "
+        "Do NOT include code fences or extra text."
     )
 
     messages = [
@@ -137,7 +158,7 @@ def call_openai_for_json(user_text):
             resp = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                max_tokens=400,
+                max_tokens=250,
                 temperature=0.2,
             )
             ai_text = resp.choices[0].message.content.strip()
@@ -145,7 +166,7 @@ def call_openai_for_json(user_text):
             resp = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                max_tokens=400,
+                max_tokens=250,
                 temperature=0.2,
             )
             ai_text = resp.choices[0].message["content"].strip()
@@ -160,90 +181,146 @@ def call_openai_for_json(user_text):
 
     return ai_text, parsed
 
-# -------------------------------------------------------
-# Supabase Routing (Timestamp + Containers)
-# -------------------------------------------------------
+# -------------------------------
+# Field mapping → your tables
+# -------------------------------
+def map_payload(container, fields, chat_id):
+    """
+    Map the LLM 'fields' to your actual Supabase table columns.
+    Current table columns per your screenshots:
+
+    sleep(id, user_id, date, sleep_score, energy_score, duration_hr, resting_hr, notes)
+    exercise(id, user_id, date, duration_min, calories_kcal, avg_hr, max_hr, notes)
+    food(id, user_id, date, meal_name, calories_kcal, protein_g, carbs_g, fat_g, notes)
+    users(chat_id pk/unique?, current_weight_kg, height_cm, tdee_goal_kcal, ...)
+    weight_history(id, user_id, weight_kg, timestamp)
+    """
+    ts = now_iso()
+    # Accept either 'date' provided by LLM, or use UTC date
+    date_val = fields.get("date") or ts[:10]
+
+    if container == "sleep":
+        return "sleep", {
+            "user_id": str(chat_id),
+            "date": date_val,
+            "sleep_score": fields.get("sleep_score"),
+            "energy_score": fields.get("energy_score"),
+            "duration_hr": fields.get("duration_hr") or fields.get("duration"),
+            "resting_hr": fields.get("resting_hr"),
+            "notes": fields.get("notes"),
+        }
+
+    if container == "exercise":
+        return "exercise", {
+            "user_id": str(chat_id),
+            "date": date_val,
+            "duration_min": fields.get("duration_min") or fields.get("duration_minutes"),
+            "calories_kcal": fields.get("calories_kcal") or fields.get("tdee_kcal"),
+            "avg_hr": fields.get("avg_hr") or fields.get("average_hr"),
+            "max_hr": fields.get("max_hr"),
+            "notes": fields.get("notes"),
+        }
+
+    if container == "food":
+        return "food", {
+            "user_id": str(chat_id),
+            "date": date_val,
+            "meal_name": fields.get("meal_name") or fields.get("name"),
+            "calories_kcal": fields.get("calories_kcal"),
+            "protein_g": fields.get("protein_g"),
+            "carbs_g": fields.get("carbs_g"),
+            "fat_g": fields.get("fat_g"),
+            "notes": fields.get("notes"),
+        }
+
+    if container == "user":
+        # For weight updates, we patch users and insert into weight_history
+        # Return a special marker the router will act on.
+        mapped = {
+            "current_weight_kg": fields.get("current_weight_kg"),
+            "height_cm": fields.get("height_cm"),
+            "tdee_goal_kcal": fields.get("tdee_goal_kcal"),
+        }
+        return "user", mapped
+
+    return None, None
+
+# -------------------------------
+# Route to Supabase tables
+# -------------------------------
 def route_to_container(parsed_json, chat_id):
     if not parsed_json or "container" not in parsed_json:
-        return False
+        return False, "no_container"
 
     container = parsed_json["container"]
-    fields = parsed_json.get("fields", {})
-    fields["timestamp"] = datetime.utcnow().isoformat()
-    headers = {
-        "apikey": SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-        "Content-Type": "application/json",
+    fields = parsed_json.get("fields", {}) or {}
+    table, payload = map_payload(container, fields, chat_id)
+
+    if table is None:
+        logger.warning("Unknown container: %s", container)
+        return False, "unknown_container"
+
+    # Special handling for user weight updates
+    if table == "user":
+        did_any = False
+        if payload.get("current_weight_kg") is not None:
+            # patch users
+            ok1, _ = sb_patch(f"/rest/v1/users?chat_id=eq.{chat_id}", {
+                "current_weight_kg": payload["current_weight_kg"]
+            })
+            # insert weight_history
+            ok2, _ = sb_post("/rest/v1/weight_history", {
+                "user_id": str(chat_id),
+                "weight_kg": payload["current_weight_kg"],
+                "timestamp": now_iso(),
+            })
+            did_any = ok1 and ok2
+            if not did_any:
+                return False, "user_weight_write_failed"
+        # optional patches for height / tdee_goal
+        if payload.get("height_cm") is not None:
+            sb_patch(f"/rest/v1/users?chat_id=eq.{chat_id}", {"height_cm": payload["height_cm"]})
+        if payload.get("tdee_goal_kcal") is not None:
+            sb_patch(f"/rest/v1/users?chat_id=eq.{chat_id}", {"tdee_goal_kcal": payload["tdee_goal_kcal"]})
+        return True, "user_updated" if did_any else "user_patched"
+
+    # Normal container insert
+    ok, _ = sb_post(f"/rest/v1/{table}", payload)
+    return (ok, "insert_ok" if ok else "insert_failed")
+
+# -------------------------------
+# Audit log in entries
+# -------------------------------
+def log_entry(chat_id, user_message, ai_text, parsed_json, note):
+    payload = {
+        "chat_id": str(chat_id),
+        "user_message": user_message,
+        "ai_response": ai_text,
+        "parsed": bool(parsed_json),
+        "parsed_json": parsed_json,
+        "created_at": now_iso(),
+        "notes": note,
     }
+    ok, _ = sb_post("/rest/v1/entries", payload)
+    if not ok:
+        logger.error("Failed to write audit entry.")
 
-    try:
-        # User → weight + history
-        if container == "user" and "current_weight_kg" in fields:
-            weight = fields["current_weight_kg"]
-            requests.patch(
-                f"{SUPABASE_URL}/rest/v1/users?chat_id=eq.{chat_id}",
-                headers=headers,
-                json={"current_weight_kg": weight},
-            )
-            requests.post(
-                f"{SUPABASE_URL}/rest/v1/weight_history",
-                headers=headers,
-                json={"user_id": chat_id, "weight_kg": weight, "timestamp": fields["timestamp"]},
-            )
-            return True
-
-        # Exercise / Food / Sleep
-        if container in ["sleep", "exercise", "food"]:
-            fields["chat_id"] = chat_id
-            requests.post(
-                f"{SUPABASE_URL}/rest/v1/{container}",
-                headers=headers,
-                json=fields,
-            )
-            return True
-
-        return False
-    except Exception as e:
-        logger.exception(f"Failed routing to {container}: {e}")
-        return False
-
-# -------------------------------------------------------
-# Supabase Log
-# -------------------------------------------------------
-def log_to_supabase(entry):
-    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
-        logger.warning("Supabase not configured.")
-        return False
-
-    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/entries"
-    headers = {
-        "apikey": SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation",
-    }
-
-    try:
-        r = requests.post(url, headers=headers, json=entry, timeout=10)
-        return r.status_code in (200, 201)
-    except Exception:
-        logger.exception("Failed to log to Supabase.")
-        return False
-
-# -------------------------------------------------------
-# Telegram Send
-# -------------------------------------------------------
+# -------------------------------
+# Telegram
+# -------------------------------
 def send_telegram_message(chat_id, text):
     try:
-        url = f"{TELEGRAM_API_URL}/sendMessage"
-        payload = {"chat_id": chat_id, "text": text}
-        requests.post(url, json=payload, timeout=10)
+        requests.post(
+            f"{TELEGRAM_API_URL}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
     except Exception:
         logger.exception("Failed to send Telegram message.")
 
-# -------------------------------------------------------
-# Flask Webhook
-# -------------------------------------------------------
+# -------------------------------
+# Flask routes
+# -------------------------------
 @app.route("/")
 def index():
     return jsonify({"status": "ok"})
@@ -258,67 +335,52 @@ def webhook():
     if not message:
         return jsonify({"ok": True})
 
-    text = ""
     chat = message.get("chat", {}) or {}
     chat_id = chat.get("id")
+    if not chat_id:
+        return jsonify({"ok": True})
 
-    # Image → OCR
+    # Ingest
     if "photo" in message:
         file_id = message["photo"][-1]["file_id"]
-        file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=15).json()
-        file_path = file_info.get("result", {}).get("file_path")
-        if file_path:
-            file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
-            text = extract_text_from_image(file_url)
-        else:
-            text = "[OCR error] Missing file path."
-
-    # Voice → transcription
+        finfo = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=15).json()
+        fpath = finfo.get("result", {}).get("file_path")
+        text = extract_text_from_image(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}") if fpath else "[OCR error] Missing file path."
     elif "voice" in message:
         file_id = message["voice"]["file_id"]
-        file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=15).json()
-        file_path = file_info.get("result", {}).get("file_path")
-        if file_path:
-            file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
-            text = transcribe_voice(file_url)
-        else:
-            text = "[Voice error] Missing file path."
-
-    # Plain text
+        finfo = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=15).json()
+        fpath = finfo.get("result", {}).get("file_path")
+        text = transcribe_voice(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}") if fpath else "[Voice error] Missing file path."
     else:
         text = message.get("text", "")
 
-    if not chat_id or not text:
+    if not text:
         return jsonify({"ok": True})
 
+    # Structure with LLM
     ai_text, parsed_json = call_openai_for_json(text)
 
-    entry = {
-        "chat_id": str(chat_id),
-        "user_message": text,
-        "ai_response": ai_text,
-        "parsed": bool(parsed_json),
-        "parsed_json": parsed_json,
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-    log_to_supabase(entry)
+    # Route to table
+    success, status = route_to_container(parsed_json, chat_id)
 
-    if parsed_json:
-        route_to_container(parsed_json, chat_id)
+    # Audit
+    log_entry(chat_id, text, ai_text, parsed_json, status)
 
-    confirmation = "Received and processed your message."
+    # Reply
+    preview = ""
     if ("photo" in message or "voice" in message) and text:
-        preview = (text[:300] + "…") if len(text) > 300 else text
-        confirmation = f"OCR/Transcript preview:\n{preview}\n\n" + confirmation
+        cut = text[:600] + ("…" if len(text) > 600 else "")
+        preview = f"OCR/Transcript preview:\n{cut}\n\n"
 
+    tail = "Saved." if success else f"Saved to log, but container insert failed ({status})."
     if parsed_json and isinstance(parsed_json, dict) and parsed_json.get("notes"):
-        confirmation += f"\nNotes: {parsed_json['notes']}"
+        tail += f"\nNotes: {parsed_json['notes']}"
 
-    send_telegram_message(chat_id, confirmation)
+    send_telegram_message(chat_id, f"{preview}Received and processed your message.\n{tail}")
     return jsonify({"ok": True})
 
-# -------------------------------------------------------
-# Run Server
-# -------------------------------------------------------
+# -------------------------------
+# Run
+# -------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
