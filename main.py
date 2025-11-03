@@ -21,6 +21,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+OCR_API_KEY = os.getenv("OCR_API_KEY")
 
 # Initialize OpenAI
 openai_client = None
@@ -36,14 +37,43 @@ app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # -------------------------------------------------------
-# OCR Function (placeholder for Google Vision API)
+# OCR Function (Real OCR.Space Integration)
 # -------------------------------------------------------
-def extract_text_from_image(file_url):
+def extract_text_from_image(file_url: str) -> str:
+    """
+    Extract text from an image using OCR.Space.
+    Expects a Telegram file URL that is publicly retrievable via your bot token.
+    """
+    if not OCR_API_KEY:
+        logger.warning("OCR_API_KEY not set; returning placeholder.")
+        return "[OCR disabled: missing OCR_API_KEY]"
+
     try:
-        # Placeholder — replace with Google Vision or Tesseract API
-        return "[OCR not implemented: image received]"
+        payload = {
+            "apikey": OCR_API_KEY,
+            "url": file_url,
+            "language": "eng",
+            "OCREngine": 2,
+            "isTable": True,
+            "scale": True
+        }
+        r = requests.post("https://api.ocr.space/parse/image", data=payload, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+
+        if data.get("IsErroredOnProcessing"):
+            err = data.get("ErrorMessage") or data.get("ErrorDetails") or "Unknown OCR error"
+            if isinstance(err, list):
+                err = "; ".join(err)
+            return f"[OCR error] {err}"
+
+        results = data.get("ParsedResults", [])
+        if not results:
+            return "[OCR found no text]"
+        text = results[0].get("ParsedText", "").strip()
+        return text or "[OCR found no text]"
     except Exception as e:
-        logger.exception("OCR error")
+        logger.exception("OCR call failed")
         return f"[OCR error] {e}"
 
 # -------------------------------------------------------
@@ -168,11 +198,22 @@ def webhook():
         return jsonify({"ok": True})
 
     text = ""
+    chat_id = message.get("chat", {}).get("id")
+
+    # Handle images and voice
     if "photo" in message:
         file_id = message["photo"][-1]["file_id"]
         file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}").json()
         file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_info['result']['file_path']}"
         text = extract_text_from_image(file_url)
+        send_telegram_message(chat_id, f"OCR preview:\n{text[:200]}")
+
+    elif "document" in message and str(message["document"].get("mime_type", "")).startswith("image/"):
+        file_id = message["document"]["file_id"]
+        file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}").json()
+        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_info['result']['file_path']}"
+        text = extract_text_from_image(file_url)
+        send_telegram_message(chat_id, f"OCR preview:\n{text[:200]}")
 
     elif "voice" in message:
         file_id = message["voice"]["file_id"]
@@ -183,7 +224,6 @@ def webhook():
     else:
         text = message.get("text", "")
 
-    chat_id = message.get("chat", {}).get("id")
     if not chat_id or not text:
         return jsonify({"ok": True})
 
