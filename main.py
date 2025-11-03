@@ -69,7 +69,7 @@ def extract_text_from_image(file_url: str) -> str:
         b64_image = base64.b64encode(resp.content).decode("ascii")
 
         msgs = [
-            {"role": "system", "content": "Extract the visible text from screenshots. Output only the raw text, no explanations."},
+            {"role": "system", "content": "Extract all visible text from the image, no commentary."},
             {"role": "user", "content": [
                 {"type": "text", "text": "Extract all readable text."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}}
@@ -142,15 +142,16 @@ def call_openai_for_json(user_text):
     return ai_text, None
 
 # -------------------------------------------------------
-# Mapping to DB fields
+# Mapping to DB fields (user_id fix)
 # -------------------------------------------------------
 def map_payload(container, fields, chat_id):
     ts = now_iso()
     date_val = fields.get("date") or ts[:10]
+    user_id_str = str(chat_id)  # Always store as string-safe ID
 
     if container == "sleep":
         return "sleep", {
-            "user_id": str(chat_id),
+            "user_id": user_id_str,
             "date": date_val,
             "sleep_score": fields.get("sleep_score"),
             "energy_score": fields.get("energy_score"),
@@ -161,7 +162,7 @@ def map_payload(container, fields, chat_id):
 
     if container == "exercise":
         return "exercise", {
-            "user_id": str(chat_id),
+            "user_id": user_id_str,
             "date": date_val,
             "workout_name": fields.get("workout_name") or "Workout",
             "distance_km": fields.get("distance_km"),
@@ -171,7 +172,7 @@ def map_payload(container, fields, chat_id):
 
     if container == "food":
         return "food", {
-            "user_id": str(chat_id),
+            "user_id": user_id_str,
             "date": date_val,
             "meal_name": fields.get("meal_name") or fields.get("name"),
             "calories_kcal": fields.get("calories_kcal"),
