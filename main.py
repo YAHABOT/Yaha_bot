@@ -37,12 +37,12 @@ app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # -------------------------------------------------------
-# OCR via OpenAI Vision (fixed schema)
+# OCR via OpenAI Vision (final working schema)
 # -------------------------------------------------------
 def extract_text_from_image(file_url: str) -> str:
     """
     Download image bytes from Telegram, send to OpenAI vision model,
-    and return extracted text using the 'image_url' input schema.
+    and return extracted text using the correct 'image_url' schema.
     """
     try:
         logger.info("Downloading image for OCR...")
@@ -50,7 +50,7 @@ def extract_text_from_image(file_url: str) -> str:
         resp.raise_for_status()
         img_bytes = resp.content
 
-        # Base64 encode image for the vision call
+        # Base64 encode image for direct inclusion
         b64_image = base64.b64encode(img_bytes).decode("ascii")
 
         vision_messages = [
@@ -67,7 +67,7 @@ def extract_text_from_image(file_url: str) -> str:
                     {"type": "text", "text": "Extract all readable text."},
                     {
                         "type": "image_url",
-                        "image_url": f"data:image/jpeg;base64,{b64_image}",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}
                     },
                 ],
             },
