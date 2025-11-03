@@ -38,7 +38,7 @@ app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # -------------------------------------------------------
-# OCR via OpenAI Vision (object schema fix)
+# OCR via OpenAI Vision
 # -------------------------------------------------------
 def extract_text_from_image(file_url: str) -> str:
     try:
@@ -48,13 +48,12 @@ def extract_text_from_image(file_url: str) -> str:
         img_bytes = resp.content
         b64_image = base64.b64encode(img_bytes).decode("ascii")
 
-        # proper OpenAI vision structure
         vision_messages = [
             {
                 "role": "system",
                 "content": (
-                    "You extract text from screenshots. Return only the readable text. "
-                    "Do not describe the image or add commentary."
+                    "You extract text from screenshots. Return only readable text. "
+                    "No image descriptions or explanations."
                 ),
             },
             {
@@ -161,6 +160,82 @@ def call_openai_for_json(user_text):
     return ai_text, parsed
 
 # -------------------------------------------------------
+# Field Parsing Layer
+# -------------------------------------------------------
+def parse_fields_from_text(container: str, text: str) -> dict:
+    """Parses OCR/transcript text and extracts structured fields per container."""
+    fields = {}
+    lines = text.lower().splitlines()
+
+    try:
+        # --- Sleep ---
+        if container == "sleep":
+            for line in lines:
+                if "energy score" in line:
+                    fields["energy_score"] = ''.join([c for c in line if c.isdigit()])
+                elif "sleep score" in line:
+                    fields["sleep_score"] = ''.join([c for c in line if c.isdigit()])
+                elif "sleep time" in line and ("h" in line or "m" in line):
+                    fields["sleep_time"] = line.strip()
+                elif "actual sleep" in line:
+                    fields["actual_sleep"] = line.strip()
+                elif "rem" in line:
+                    fields["rem_quality"] = line.strip()
+                elif "deep" in line:
+                    fields["deep_sleep"] = line.strip()
+                elif "awake" in line:
+                    fields["awake_time"] = line.strip()
+
+        # --- Exercise ---
+        elif container == "exercise":
+            for line in lines:
+                if "steps" in line:
+                    fields["steps"] = ''.join([c for c in line if c.isdigit()])
+                elif "distance" in line or "km" in line:
+                    fields["distance_km"] = ''.join([c for c in line if c.isdigit() or c == '.'])
+                elif "tdee" in line:
+                    fields["tdee"] = ''.join([c for c in line if c.isdigit()])
+                elif "neat" in line:
+                    fields["neat"] = ''.join([c for c in line if c.isdigit()])
+                elif "intensity" in line:
+                    fields["training_intensity"] = ''.join([c for c in line if c.isdigit()])
+
+        # --- Food ---
+        elif container == "food":
+            for line in lines:
+                if "calories" in line or "kcal" in line:
+                    fields["calories"] = ''.join([c for c in line if c.isdigit()])
+                elif "protein" in line or "p:" in line:
+                    fields["protein_g"] = ''.join([c for c in line if c.isdigit() or c == '.'])
+                elif "carb" in line or "c:" in line:
+                    fields["carbs_g"] = ''.join([c for c in line if c.isdigit() or c == '.'])
+                elif "fat" in line or "f:" in line:
+                    fields["fat_g"] = ''.join([c for c in line if c.isdigit() or c == '.'])
+                elif "meal" in line or "wrap" in line or "bowl" in line:
+                    fields["meal_name"] = line.strip()
+
+        # --- User ---
+        elif container == "user":
+            for line in lines:
+                if "weight" in line:
+                    try:
+                        fields["current_weight_kg"] = float(''.join([c for c in line if c.isdigit() or c == '.']))
+                    except:
+                        pass
+                elif "height" in line:
+                    fields["height_cm"] = ''.join([c for c in line if c.isdigit()])
+                elif "goal" in line and "weight" in line:
+                    fields["goal_weight_kg"] = ''.join([c for c in line if c.isdigit() or c == '.'])
+                elif "bmr" in line:
+                    fields["bmr"] = ''.join([c for c in line if c.isdigit()])
+
+    except Exception as e:
+        logger.exception(f"Error while parsing {container}: {e}")
+
+    fields["timestamp"] = datetime.utcnow().isoformat()
+    return fields
+
+# -------------------------------------------------------
 # Supabase Routing
 # -------------------------------------------------------
 def route_to_container(parsed_json, chat_id):
@@ -169,7 +244,6 @@ def route_to_container(parsed_json, chat_id):
 
     container = parsed_json["container"]
     fields = parsed_json.get("fields", {})
-    fields["timestamp"] = datetime.utcnow().isoformat()
     headers = {
         "apikey": SUPABASE_ANON_KEY,
         "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
@@ -207,7 +281,7 @@ def route_to_container(parsed_json, chat_id):
         return False
 
 # -------------------------------------------------------
-# Supabase Log
+# Supabase Logging
 # -------------------------------------------------------
 def log_to_supabase(entry):
     if not SUPABASE_URL or not SUPABASE_ANON_KEY:
@@ -230,7 +304,7 @@ def log_to_supabase(entry):
         return False
 
 # -------------------------------------------------------
-# Telegram Send
+# Telegram Messaging
 # -------------------------------------------------------
 def send_telegram_message(chat_id, text):
     try:
@@ -261,6 +335,7 @@ def webhook():
     chat = message.get("chat", {}) or {}
     chat_id = chat.get("id")
 
+    # --- Handle photo input ---
     if "photo" in message:
         file_id = message["photo"][-1]["file_id"]
         file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=15).json()
@@ -271,6 +346,7 @@ def webhook():
         else:
             text = "[OCR error] Missing file path."
 
+    # --- Handle voice input ---
     elif "voice" in message:
         file_id = message["voice"]["file_id"]
         file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=15).json()
@@ -281,6 +357,7 @@ def webhook():
         else:
             text = "[Voice error] Missing file path."
 
+    # --- Handle text input ---
     else:
         text = message.get("text", "")
 
@@ -288,6 +365,11 @@ def webhook():
         return jsonify({"ok": True})
 
     ai_text, parsed_json = call_openai_for_json(text)
+    if parsed_json:
+        container = parsed_json.get("container")
+        detected_fields = parse_fields_from_text(container, text)
+        parsed_json["fields"].update(detected_fields)
+        route_to_container(parsed_json, chat_id)
 
     entry = {
         "chat_id": str(chat_id),
@@ -298,9 +380,6 @@ def webhook():
         "timestamp": datetime.utcnow().isoformat(),
     }
     log_to_supabase(entry)
-
-    if parsed_json:
-        route_to_container(parsed_json, chat_id)
 
     confirmation = "Received and processed your message."
     if ("photo" in message or "voice" in message) and text:
