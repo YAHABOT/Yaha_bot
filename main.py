@@ -3,6 +3,7 @@ import os
 import json
 import logging
 import requests
+import base64
 from flask import Flask, request, jsonify
 import openai
 from pydub import AudioSegment
@@ -21,7 +22,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
-OCR_API_KEY = os.getenv("OCR_API_KEY")
 
 # Initialize OpenAI
 openai_client = None
@@ -37,52 +37,75 @@ app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # -------------------------------------------------------
-# OCR Function (Real OCR.Space Integration)
+# OCR via OpenAI Vision (no Google Vision, no MIME games)
 # -------------------------------------------------------
 def extract_text_from_image(file_url: str) -> str:
     """
-    Extract text from an image using OCR.Space.
-    Expects a Telegram file URL that is publicly retrievable via your bot token.
+    Download image bytes from Telegram, send to OpenAI vision model,
+    and return extracted text. No external OCR API. No MIME roulette.
     """
-    if not OCR_API_KEY:
-        logger.warning("OCR_API_KEY not set; returning placeholder.")
-        return "[OCR disabled: missing OCR_API_KEY]"
-
     try:
-        payload = {
-            "apikey": OCR_API_KEY,
-            "url": file_url,
-            "language": "eng",
-            "OCREngine": 2,
-            "isTable": True,
-            "scale": True
-        }
-        r = requests.post("https://api.ocr.space/parse/image", data=payload, timeout=30)
-        r.raise_for_status()
-        data = r.json()
+        logger.info("Downloading image for OCR...")
+        resp = requests.get(file_url, timeout=20)
+        resp.raise_for_status()
+        img_bytes = resp.content
 
-        if data.get("IsErroredOnProcessing"):
-            err = data.get("ErrorMessage") or data.get("ErrorDetails") or "Unknown OCR error"
-            if isinstance(err, list):
-                err = "; ".join(err)
-            return f"[OCR error] {err}"
+        # Base64 encode image for the vision call
+        b64_image = base64.b64encode(img_bytes).decode("ascii")
 
-        results = data.get("ParsedResults", [])
-        if not results:
-            return "[OCR found no text]"
-        text = results[0].get("ParsedText", "").strip()
-        return text or "[OCR found no text]"
+        vision_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You extract text from images. Return ONLY the plain text content "
+                    "you can read from the image. No formatting, no disclaimers."
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Extract all readable text."},
+                    {
+                        "type": "input_image",
+                        "image_url": {
+                            # data URL so the model sees the image bytes directly
+                            "url": f"data:image/jpeg;base64,{b64_image}"
+                        },
+                    },
+                ],
+            },
+        ]
+
+        logger.info("Calling OpenAI vision for OCR...")
+        if openai_client:
+            comp = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=vision_messages,
+                max_tokens=800,
+                temperature=0.0,
+            )
+            text = comp.choices[0].message.content.strip()
+        else:
+            comp = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=vision_messages,
+                max_tokens=800,
+                temperature=0.0,
+            )
+            text = comp.choices[0].message["content"].strip()
+
+        return text if text else "[No text found in image]"
     except Exception as e:
-        logger.exception("OCR call failed")
+        logger.exception("OCR (OpenAI vision) error")
         return f"[OCR error] {e}"
 
 # -------------------------------------------------------
-# Voice Note Transcription
+# Voice Note Transcription (local Google SR)
 # -------------------------------------------------------
 def transcribe_voice(file_url):
     try:
         logger.info("Transcribing voice note...")
-        ogg_data = requests.get(file_url).content
+        ogg_data = requests.get(file_url, timeout=30).content
         temp_ogg = "/tmp/voice.ogg"
         temp_wav = "/tmp/voice.wav"
 
@@ -103,13 +126,14 @@ def transcribe_voice(file_url):
         return f"[Voice error] {e}"
 
 # -------------------------------------------------------
-# OpenAI Interaction
+# OpenAI Interaction for structuring user text -> JSON
 # -------------------------------------------------------
 def call_openai_for_json(user_text):
     system_prompt = (
         "You are a JSON generator for a health tracking assistant. "
-        "When given a user message, respond ONLY with a valid JSON object "
-        "containing keys like 'container' (sleep/exercise/food), 'value', and 'notes'."
+        "When given a user message, respond ONLY with a valid JSON object. "
+        "Keys: 'container' (sleep|exercise|food), 'value' (string or number), 'notes' (string). "
+        "No code fences. No extra text."
     )
 
     messages = [
@@ -173,9 +197,9 @@ def log_to_supabase(entry):
 # Telegram Message Sending
 # -------------------------------------------------------
 def send_telegram_message(chat_id, text):
-    url = f"{TELEGRAM_API_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
     try:
+        url = f"{TELEGRAM_API_URL}/sendMessage"
+        payload = {"chat_id": chat_id, "text": text}
         requests.post(url, json=payload, timeout=10)
     except Exception:
         logger.exception("Failed to send Telegram message.")
@@ -198,37 +222,43 @@ def webhook():
         return jsonify({"ok": True})
 
     text = ""
-    chat_id = message.get("chat", {}).get("id")
+    chat = message.get("chat", {}) or {}
+    chat_id = chat.get("id")
 
-    # Handle images and voice
+    # 1) Image -> OCR (OpenAI vision)
     if "photo" in message:
+        # pick largest photo Telegram gives us
         file_id = message["photo"][-1]["file_id"]
-        file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}").json()
-        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_info['result']['file_path']}"
-        text = extract_text_from_image(file_url)
-        send_telegram_message(chat_id, f"OCR preview:\n{text[:200]}")
+        file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=15).json()
+        file_path = file_info.get("result", {}).get("file_path")
+        if not file_path:
+            text = "[OCR error] Unable to fetch file path from Telegram."
+        else:
+            file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+            text = extract_text_from_image(file_url)
 
-    elif "document" in message and str(message["document"].get("mime_type", "")).startswith("image/"):
-        file_id = message["document"]["file_id"]
-        file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}").json()
-        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_info['result']['file_path']}"
-        text = extract_text_from_image(file_url)
-        send_telegram_message(chat_id, f"OCR preview:\n{text[:200]}")
-
+    # 2) Voice note -> transcription
     elif "voice" in message:
         file_id = message["voice"]["file_id"]
-        file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}").json()
-        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_info['result']['file_path']}"
-        text = transcribe_voice(file_url)
+        file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=15).json()
+        file_path = file_info.get("result", {}).get("file_path")
+        if not file_path:
+            text = "[Voice error] Unable to fetch file path from Telegram."
+        else:
+            file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+            text = transcribe_voice(file_url)
 
+    # 3) Plain text
     else:
         text = message.get("text", "")
 
     if not chat_id or not text:
         return jsonify({"ok": True})
 
+    # Ask OpenAI to structure into JSON (best effort)
     ai_text, parsed_json = call_openai_for_json(text)
 
+    # Log to Supabase
     entry = {
         "chat_id": str(chat_id),
         "user_message": text,
@@ -236,14 +266,20 @@ def webhook():
         "parsed": bool(parsed_json),
         "parsed_json": parsed_json,
     }
-
     log_to_supabase(entry)
 
-    response_text = "Received and processed your message."
-    if parsed_json and isinstance(parsed_json, dict) and "notes" in parsed_json:
-        response_text += f"\nNotes: {parsed_json['notes']}"
+    # Send a short confirmation back
+    confirmation = "Received and processed your message."
+    # for images/voice, include a short preview of the extracted text
+    if ("photo" in message or "voice" in message) and text:
+        preview = (text[:300] + "…") if len(text) > 300 else text
+        confirmation = f"OCR/Transcript preview:\n{preview}\n\n" + confirmation
 
-    send_telegram_message(chat_id, response_text)
+    # add notes if the JSON contains them
+    if parsed_json and isinstance(parsed_json, dict) and parsed_json.get("notes"):
+        confirmation += f"\nNotes: {parsed_json['notes']}"
+
+    send_telegram_message(chat_id, confirmation)
     return jsonify({"ok": True})
 
 # -------------------------------------------------------
