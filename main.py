@@ -6,6 +6,9 @@ import openai
 from pydub import AudioSegment
 import speech_recognition as sr
 
+# -------------------------------------------------------
+# Setup
+# -------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("yaha_bot")
 
@@ -26,6 +29,9 @@ if OPENAI_API_KEY:
 app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
+# -------------------------------------------------------
+# Utility helpers
+# -------------------------------------------------------
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -37,6 +43,40 @@ def sb_headers():
         "Prefer": "return=representation",
     }
 
+def clean_number(val):
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return val
+    try:
+        cleaned = re.findall(r"[-+]?\d*\.\d+|\d+", str(val))
+        return float(cleaned[0]) if cleaned else None
+    except Exception:
+        return None
+
+def fetch_table_columns(table):
+    """Fetch column list from Supabase's REST /columns endpoint"""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/{table}?limit=1"
+        headers = sb_headers()
+        headers["Range"] = "0-0"
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code in (200, 206):
+            cols = r.headers.get("content-range")
+            # fallback: query PostgREST /rpc if needed
+        # Plan B: use schema cache via /rpc if available
+        meta = requests.get(f"{SUPABASE_URL}/rest/v1/{table}", headers=headers, params={"limit": 1})
+        if meta.ok:
+            return list(meta.json()[0].keys())
+    except Exception as e:
+        logger.warning("Could not fetch schema: %s", e)
+    return []
+
+def sanitize_payload(payload, table):
+    """Drop any keys not existing in table schema"""
+    valid = set(fetch_table_columns(table))
+    return {k: v for k, v in payload.items() if k in valid}
+
 def sb_post(path, payload):
     url = f"{SUPABASE_URL}{path}"
     r = requests.post(url, headers=sb_headers(), json=payload, timeout=15)
@@ -45,19 +85,9 @@ def sb_post(path, payload):
         return False
     return True
 
-def clean_number(val):
-    if val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return val
-    try:
-        # Remove non-numeric garbage like "56 / 35" → "56"
-        cleaned = re.findall(r"[-+]?\d*\.\d+|\d+", str(val))
-        return float(cleaned[0]) if cleaned else None
-    except Exception:
-        return None
-
-# ---------- OCR ----------
+# -------------------------------------------------------
+# OCR
+# -------------------------------------------------------
 def extract_text_from_image(file_url: str) -> str:
     try:
         resp = requests.get(file_url, timeout=20)
@@ -82,7 +112,9 @@ def extract_text_from_image(file_url: str) -> str:
         logger.exception("OCR error")
         return f"[OCR error] {e}"
 
-# ---------- VOICE ----------
+# -------------------------------------------------------
+# Voice
+# -------------------------------------------------------
 def transcribe_voice(file_url):
     try:
         ogg = requests.get(file_url, timeout=30).content
@@ -96,44 +128,40 @@ def transcribe_voice(file_url):
         logger.exception("Voice transcription failed")
         return f"[Voice error] {e}"
 
-# ---------- JSON GENERATOR ----------
+# -------------------------------------------------------
+# JSON generation
+# -------------------------------------------------------
 def call_openai_for_json(user_text):
     system_prompt = (
         "You are a JSON generator for a health tracking assistant. "
         "Return ONLY valid JSON with keys: "
         "'container' (sleep|exercise|food|user), 'fields' (object), and 'notes' (string). "
-        "No markdown, no code fences, pure JSON."
+        "Output pure JSON, no text around it."
     )
+    msgs = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_text},
+    ]
+    try:
+        if openai_client:
+            resp = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=400)
+            ai_text = resp.choices[0].message.content.strip()
+        else:
+            resp = openai.ChatCompletion.create(model="gpt-4o-mini", messages=msgs, max_tokens=400)
+            ai_text = resp.choices[0].message["content"].strip()
+        parsed = json.loads(ai_text)
+        return ai_text, parsed if isinstance(parsed, dict) else None
+    except Exception as e:
+        logger.warning("Bad AI response: %s", e)
+        return str(e), None
 
-    for attempt in range(2):
-        msgs = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_text},
-        ]
-        try:
-            if openai_client:
-                resp = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=300)
-                ai_text = resp.choices[0].message.content.strip()
-            else:
-                resp = openai.ChatCompletion.create(model="gpt-4o-mini", messages=msgs, max_tokens=300)
-                ai_text = resp.choices[0].message["content"].strip()
-        except Exception as e:
-            return f"[OpenAI error] {e}", None
-
-        try:
-            parsed = json.loads(ai_text)
-            if isinstance(parsed, dict) and "container" in parsed:
-                return ai_text, parsed
-        except Exception:
-            logger.warning("Non-JSON response, retrying...")
-
-    return ai_text, None
-
-# ---------- MAP TO TABLE ----------
+# -------------------------------------------------------
+# Mapping
+# -------------------------------------------------------
 def map_payload(container, fields, chat_id):
     ts = now_iso()
-    date_val = fields.get("date") or ts[:10]
     user_id_str = str(chat_id)
+    date_val = fields.get("date") or ts[:10]
 
     if container == "sleep":
         return "sleep", {
@@ -145,7 +173,6 @@ def map_payload(container, fields, chat_id):
             "resting_hr": clean_number(fields.get("resting_hr")),
             "notes": fields.get("notes"),
         }
-
     if container == "exercise":
         return "exercise", {
             "user_id": user_id_str,
@@ -155,7 +182,6 @@ def map_payload(container, fields, chat_id):
             "duration_min": clean_number(fields.get("duration_min") or fields.get("duration")),
             "calories_burned": clean_number(fields.get("calories_burned") or fields.get("calories_kcal")),
         }
-
     if container == "food":
         return "food", {
             "user_id": user_id_str,
@@ -167,17 +193,11 @@ def map_payload(container, fields, chat_id):
             "fat_g": clean_number(fields.get("fat_g")),
             "notes": fields.get("notes"),
         }
-
-    if container == "user":
-        return "user", {
-            "current_weight_kg": clean_number(fields.get("current_weight_kg")),
-            "height_cm": clean_number(fields.get("height_cm")),
-            "tdee_goal_kcal": clean_number(fields.get("tdee_goal_kcal")),
-        }
-
     return None, None
 
-# ---------- ROUTER ----------
+# -------------------------------------------------------
+# Router
+# -------------------------------------------------------
 def route_to_container(parsed_json, chat_id):
     if not parsed_json or "container" not in parsed_json:
         return False, "no_container"
@@ -186,10 +206,17 @@ def route_to_container(parsed_json, chat_id):
     table, payload = map_payload(container, fields, chat_id)
     if not table:
         return False, "unknown_container"
-    ok = sb_post(f"/rest/v1/{table}", payload)
+
+    sanitized = sanitize_payload(payload, table)
+    if not sanitized:
+        return False, "empty_payload"
+
+    ok = sb_post(f"/rest/v1/{table}", sanitized)
     return ok, "insert_ok" if ok else "insert_failed"
 
-# ---------- LOGGING ----------
+# -------------------------------------------------------
+# Logging + Telegram
+# -------------------------------------------------------
 def log_entry(chat_id, text, ai_text, parsed_json, status):
     sb_post("/rest/v1/entries", {
         "chat_id": str(chat_id),
@@ -207,7 +234,9 @@ def send_telegram_message(chat_id, text):
     except Exception:
         logger.exception("Telegram send failed")
 
-# ---------- FLASK ----------
+# -------------------------------------------------------
+# Flask
+# -------------------------------------------------------
 @app.route("/")
 def index():
     return jsonify({"status": "ok"})
@@ -215,26 +244,18 @@ def index():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(force=True, silent=True)
-    if not data:
-        return jsonify({"ok": True})
-
-    msg = data.get("message") or data.get("edited_message")
-    if not msg:
-        return jsonify({"ok": True})
-
+    msg = data.get("message") or data.get("edited_message") or {}
     chat_id = msg.get("chat", {}).get("id")
     text = ""
 
     if "photo" in msg:
         fid = msg["photo"][-1]["file_id"]
-        finfo = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=15).json()
-        path = finfo.get("result", {}).get("file_path")
-        text = extract_text_from_image(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{path}") if path else "[OCR error]"
+        fpath = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
+        text = extract_text_from_image(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}") if fpath else "[OCR error]"
     elif "voice" in msg:
         fid = msg["voice"]["file_id"]
-        finfo = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=15).json()
-        path = finfo.get("result", {}).get("file_path")
-        text = transcribe_voice(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{path}") if path else "[Voice error]"
+        fpath = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
+        text = transcribe_voice(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}") if fpath else "[Voice error]"
     else:
         text = msg.get("text", "")
 
@@ -242,12 +263,8 @@ def webhook():
     ok, status = route_to_container(parsed_json, chat_id)
     log_entry(chat_id, text, ai_text, parsed_json, status)
 
-    preview = ""
-    if ("photo" in msg or "voice" in msg) and text:
-        short = (text[:400] + "…") if len(text) > 400 else text
-        preview = f"OCR/Transcript preview:\n{short}\n\n"
-
-    msg_txt = f"{preview}Processed.\n"
+    preview = (text[:400] + "…") if len(text) > 400 else text
+    msg_txt = f"OCR/Transcript preview:\n{preview}\n\nProcessed.\n"
     msg_txt += "✅ Saved." if ok else f"⚠️ Log only — {status}."
     if parsed_json and parsed_json.get("notes"):
         msg_txt += f"\nNotes: {parsed_json['notes']}"
@@ -255,5 +272,8 @@ def webhook():
     send_telegram_message(chat_id, msg_txt)
     return jsonify({"ok": True})
 
+# -------------------------------------------------------
+# Run
+# -------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
