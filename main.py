@@ -48,12 +48,12 @@ def extract_text_from_image(file_url: str) -> str:
         img_bytes = resp.content
         b64_image = base64.b64encode(img_bytes).decode("ascii")
 
-        vision_messages = [
+        messages = [
             {
                 "role": "system",
                 "content": (
-                    "You extract text from screenshots. Return only readable text. "
-                    "No image descriptions or explanations."
+                    "You extract text from screenshots of health apps. "
+                    "Return only the readable text, no commentary."
                 ),
             },
             {
@@ -69,7 +69,7 @@ def extract_text_from_image(file_url: str) -> str:
         if openai_client:
             comp = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=vision_messages,
+                messages=messages,
                 max_tokens=1000,
                 temperature=0.0,
             )
@@ -77,7 +77,7 @@ def extract_text_from_image(file_url: str) -> str:
         else:
             comp = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
-                messages=vision_messages,
+                messages=messages,
                 max_tokens=1000,
                 temperature=0.0,
             )
@@ -115,7 +115,7 @@ def transcribe_voice(file_url):
         return f"[Voice error] {e}"
 
 # -------------------------------------------------------
-# OpenAI → JSON Structuring
+# OpenAI → JSON Structuring (Sleep Fix Included)
 # -------------------------------------------------------
 def call_openai_for_json(user_text):
     system_prompt = (
@@ -123,7 +123,8 @@ def call_openai_for_json(user_text):
         "Return only a valid JSON object with: "
         "'container' (sleep|exercise|food|user), "
         "'fields' (dictionary of data points), and 'notes' (string). "
-        "Do not include markdown or text outside JSON."
+        "If 'sleep score' looks like '56 - 35' or '56 ↓ 35', treat 56 as 'sleep_score' "
+        "and -35 as 'sleep_delta'. Do not include markdown or extra text."
     )
 
     messages = [
@@ -136,7 +137,7 @@ def call_openai_for_json(user_text):
             resp = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                max_tokens=200,
+                max_tokens=400,
                 temperature=0.2,
             )
             ai_text = resp.choices[0].message.content.strip()
@@ -144,7 +145,7 @@ def call_openai_for_json(user_text):
             resp = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                max_tokens=200,
+                max_tokens=400,
                 temperature=0.2,
             )
             ai_text = resp.choices[0].message["content"].strip()
@@ -160,83 +161,7 @@ def call_openai_for_json(user_text):
     return ai_text, parsed
 
 # -------------------------------------------------------
-# Field Parsing Layer
-# -------------------------------------------------------
-def parse_fields_from_text(container: str, text: str) -> dict:
-    """Parses OCR/transcript text and extracts structured fields per container."""
-    fields = {}
-    lines = text.lower().splitlines()
-
-    try:
-        # --- Sleep ---
-        if container == "sleep":
-            for line in lines:
-                if "energy score" in line:
-                    fields["energy_score"] = ''.join([c for c in line if c.isdigit()])
-                elif "sleep score" in line:
-                    fields["sleep_score"] = ''.join([c for c in line if c.isdigit()])
-                elif "sleep time" in line and ("h" in line or "m" in line):
-                    fields["sleep_time"] = line.strip()
-                elif "actual sleep" in line:
-                    fields["actual_sleep"] = line.strip()
-                elif "rem" in line:
-                    fields["rem_quality"] = line.strip()
-                elif "deep" in line:
-                    fields["deep_sleep"] = line.strip()
-                elif "awake" in line:
-                    fields["awake_time"] = line.strip()
-
-        # --- Exercise ---
-        elif container == "exercise":
-            for line in lines:
-                if "steps" in line:
-                    fields["steps"] = ''.join([c for c in line if c.isdigit()])
-                elif "distance" in line or "km" in line:
-                    fields["distance_km"] = ''.join([c for c in line if c.isdigit() or c == '.'])
-                elif "tdee" in line:
-                    fields["tdee"] = ''.join([c for c in line if c.isdigit()])
-                elif "neat" in line:
-                    fields["neat"] = ''.join([c for c in line if c.isdigit()])
-                elif "intensity" in line:
-                    fields["training_intensity"] = ''.join([c for c in line if c.isdigit()])
-
-        # --- Food ---
-        elif container == "food":
-            for line in lines:
-                if "calories" in line or "kcal" in line:
-                    fields["calories"] = ''.join([c for c in line if c.isdigit()])
-                elif "protein" in line or "p:" in line:
-                    fields["protein_g"] = ''.join([c for c in line if c.isdigit() or c == '.'])
-                elif "carb" in line or "c:" in line:
-                    fields["carbs_g"] = ''.join([c for c in line if c.isdigit() or c == '.'])
-                elif "fat" in line or "f:" in line:
-                    fields["fat_g"] = ''.join([c for c in line if c.isdigit() or c == '.'])
-                elif "meal" in line or "wrap" in line or "bowl" in line:
-                    fields["meal_name"] = line.strip()
-
-        # --- User ---
-        elif container == "user":
-            for line in lines:
-                if "weight" in line:
-                    try:
-                        fields["current_weight_kg"] = float(''.join([c for c in line if c.isdigit() or c == '.']))
-                    except:
-                        pass
-                elif "height" in line:
-                    fields["height_cm"] = ''.join([c for c in line if c.isdigit()])
-                elif "goal" in line and "weight" in line:
-                    fields["goal_weight_kg"] = ''.join([c for c in line if c.isdigit() or c == '.'])
-                elif "bmr" in line:
-                    fields["bmr"] = ''.join([c for c in line if c.isdigit()])
-
-    except Exception as e:
-        logger.exception(f"Error while parsing {container}: {e}")
-
-    fields["timestamp"] = datetime.utcnow().isoformat()
-    return fields
-
-# -------------------------------------------------------
-# Supabase Routing
+# Supabase Routing (Timestamp + Containers)
 # -------------------------------------------------------
 def route_to_container(parsed_json, chat_id):
     if not parsed_json or "container" not in parsed_json:
@@ -244,6 +169,7 @@ def route_to_container(parsed_json, chat_id):
 
     container = parsed_json["container"]
     fields = parsed_json.get("fields", {})
+    fields["timestamp"] = datetime.utcnow().isoformat()
     headers = {
         "apikey": SUPABASE_ANON_KEY,
         "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
@@ -251,6 +177,7 @@ def route_to_container(parsed_json, chat_id):
     }
 
     try:
+        # User → weight + history
         if container == "user" and "current_weight_kg" in fields:
             weight = fields["current_weight_kg"]
             requests.patch(
@@ -265,6 +192,7 @@ def route_to_container(parsed_json, chat_id):
             )
             return True
 
+        # Exercise / Food / Sleep
         if container in ["sleep", "exercise", "food"]:
             fields["chat_id"] = chat_id
             requests.post(
@@ -275,13 +203,12 @@ def route_to_container(parsed_json, chat_id):
             return True
 
         return False
-
     except Exception as e:
         logger.exception(f"Failed routing to {container}: {e}")
         return False
 
 # -------------------------------------------------------
-# Supabase Logging
+# Supabase Log
 # -------------------------------------------------------
 def log_to_supabase(entry):
     if not SUPABASE_URL or not SUPABASE_ANON_KEY:
@@ -304,7 +231,7 @@ def log_to_supabase(entry):
         return False
 
 # -------------------------------------------------------
-# Telegram Messaging
+# Telegram Send
 # -------------------------------------------------------
 def send_telegram_message(chat_id, text):
     try:
@@ -335,7 +262,7 @@ def webhook():
     chat = message.get("chat", {}) or {}
     chat_id = chat.get("id")
 
-    # --- Handle photo input ---
+    # Image → OCR
     if "photo" in message:
         file_id = message["photo"][-1]["file_id"]
         file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=15).json()
@@ -346,7 +273,7 @@ def webhook():
         else:
             text = "[OCR error] Missing file path."
 
-    # --- Handle voice input ---
+    # Voice → transcription
     elif "voice" in message:
         file_id = message["voice"]["file_id"]
         file_info = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={file_id}", timeout=15).json()
@@ -357,7 +284,7 @@ def webhook():
         else:
             text = "[Voice error] Missing file path."
 
-    # --- Handle text input ---
+    # Plain text
     else:
         text = message.get("text", "")
 
@@ -365,11 +292,6 @@ def webhook():
         return jsonify({"ok": True})
 
     ai_text, parsed_json = call_openai_for_json(text)
-    if parsed_json:
-        container = parsed_json.get("container")
-        detected_fields = parse_fields_from_text(container, text)
-        parsed_json["fields"].update(detected_fields)
-        route_to_container(parsed_json, chat_id)
 
     entry = {
         "chat_id": str(chat_id),
@@ -380,6 +302,9 @@ def webhook():
         "timestamp": datetime.utcnow().isoformat(),
     }
     log_to_supabase(entry)
+
+    if parsed_json:
+        route_to_container(parsed_json, chat_id)
 
     confirmation = "Received and processed your message."
     if ("photo" in message or "voice" in message) and text:
