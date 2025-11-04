@@ -16,6 +16,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL       = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_ANON_KEY  = os.getenv("SUPABASE_ANON_KEY")
+HTTP_TIMEOUT       = int(os.getenv("HTTP_TIMEOUT", "15"))
 
 openai_client = None
 if OPENAI_API_KEY:
@@ -28,6 +29,25 @@ if OPENAI_API_KEY:
 
 app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+
+# -------------------------------------------------------
+# Hard allow-lists per table (so sanitizer can function even when tables are empty)
+# Match your Supabase defs: public.sleep / public.exercise / public.food
+# -------------------------------------------------------
+TABLE_COLUMNS = {
+    "sleep": {
+        "user_id", "date", "sleep_score", "energy_score", "duration_hr", "resting_hr", "notes"
+    },
+    "exercise": {
+        "user_id", "date", "workout_name", "distance_km", "duration_min", "calories_burned", "notes"
+    },
+    "food": {
+        "user_id", "date", "meal_name", "calories_kcal", "protein_g", "carbs_g", "fat_g", "notes"
+    },
+    "entries": {
+        "chat_id", "user_message", "ai_response", "parsed", "parsed_json", "created_at", "notes"
+    }
+}
 
 # -------------------------------------------------------
 # Utility helpers
@@ -47,55 +67,39 @@ def clean_number(val):
     if val is None:
         return None
     if isinstance(val, (int, float)):
-        return val
+        return float(val)
     try:
-        cleaned = re.findall(r"[-+]?\d*\.\d+|\d+", str(val))
-        return float(cleaned[0]) if cleaned else None
+        m = re.findall(r"[-+]?\d*\.\d+|[-+]?\d+", str(val))
+        return float(m[0]) if m else None
     except Exception:
         return None
 
-def fetch_table_columns(table):
-    """Fetch column list from Supabase's REST /columns endpoint"""
-    try:
-        url = f"{SUPABASE_URL}/rest/v1/{table}?limit=1"
-        headers = sb_headers()
-        headers["Range"] = "0-0"
-        r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code in (200, 206):
-            cols = r.headers.get("content-range")
-            # fallback: query PostgREST /rpc if needed
-        # Plan B: use schema cache via /rpc if available
-        meta = requests.get(f"{SUPABASE_URL}/rest/v1/{table}", headers=headers, params={"limit": 1})
-        if meta.ok:
-            return list(meta.json()[0].keys())
-    except Exception as e:
-        logger.warning("Could not fetch schema: %s", e)
-    return []
-
 def sanitize_payload(payload, table):
-    """Drop any keys not existing in table schema"""
-    valid = set(fetch_table_columns(table))
-    return {k: v for k, v in payload.items() if k in valid}
+    allowed = TABLE_COLUMNS.get(table, set())
+    if not allowed:
+        # If we don’t know the table, just return payload as-is.
+        return payload
+    return {k: v for k, v in payload.items() if k in allowed and v is not None}
 
 def sb_post(path, payload):
     url = f"{SUPABASE_URL}{path}"
-    r = requests.post(url, headers=sb_headers(), json=payload, timeout=15)
+    r = requests.post(url, headers=sb_headers(), json=payload, timeout=HTTP_TIMEOUT)
     if r.status_code not in (200, 201):
         logger.error("Supabase POST %s: %s\nPayload: %s", r.status_code, r.text, json.dumps(payload))
         return False
     return True
 
 # -------------------------------------------------------
-# OCR
+# OCR (OpenAI Vision) — keep tokens smaller to avoid sluggishness
 # -------------------------------------------------------
 def extract_text_from_image(file_url: str) -> str:
     try:
-        resp = requests.get(file_url, timeout=20)
+        resp = requests.get(file_url, timeout=HTTP_TIMEOUT)
         resp.raise_for_status()
         b64_image = base64.b64encode(resp.content).decode("ascii")
 
         msgs = [
-            {"role": "system", "content": "Extract visible text, no commentary."},
+            {"role": "system", "content": "Extract visible text from the image. Plain text only."},
             {"role": "user", "content": [
                 {"type": "text", "text": "Extract all readable text."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}}
@@ -103,10 +107,20 @@ def extract_text_from_image(file_url: str) -> str:
         ]
 
         if openai_client:
-            comp = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=1200)
+            comp = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=msgs,
+                max_tokens=700,
+                temperature=0.0,
+            )
             return comp.choices[0].message.content.strip()
         else:
-            comp = openai.ChatCompletion.create(model="gpt-4o-mini", messages=msgs, max_tokens=1200)
+            comp = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=msgs,
+                max_tokens=700,
+                temperature=0.0,
+            )
             return comp.choices[0].message["content"].strip()
     except Exception as e:
         logger.exception("OCR error")
@@ -117,9 +131,10 @@ def extract_text_from_image(file_url: str) -> str:
 # -------------------------------------------------------
 def transcribe_voice(file_url):
     try:
-        ogg = requests.get(file_url, timeout=30).content
+        ogg = requests.get(file_url, timeout=HTTP_TIMEOUT).content
         tmp_ogg, tmp_wav = "/tmp/voice.ogg", "/tmp/voice.wav"
-        with open(tmp_ogg, "wb") as f: f.write(ogg)
+        with open(tmp_ogg, "wb") as f:
+            f.write(ogg)
         AudioSegment.from_ogg(tmp_ogg).export(tmp_wav, format="wav")
         rec = sr.Recognizer()
         with sr.AudioFile(tmp_wav) as src:
@@ -129,14 +144,54 @@ def transcribe_voice(file_url):
         return f"[Voice error] {e}"
 
 # -------------------------------------------------------
-# JSON generation
+# Fallback text parsers (Samsung-style sleep screenshots)
+# These run when LLM JSON is missing or useless.
+# -------------------------------------------------------
+def _parse_duration_hours(text: str):
+    # captures "5 h 23 m" or "7 h 34 m" into hours as float
+    m = re.search(r"(\d+)\s*h\s*(\d+)\s*m", text, re.I)
+    if not m:
+        return None
+    h, m_ = int(m.group(1)), int(m.group(2))
+    return round(h + m_/60.0, 2)
+
+def _parse_sleep_score(text: str):
+    # prefer "Sleep score" section: "56 - 35" -> take the first number (current)
+    m = re.search(r"sleep\s*score.*?\b(\d+)\b(?:\s*[-/]\s*\d+)?", text, re.I | re.S)
+    if m:
+        return clean_number(m.group(1))
+    # fallback: any lone "Sleep score" then next int
+    m = re.search(r"sleep\s*score.*?\b(\d+)\b", text, re.I | re.S)
+    return clean_number(m.group(1)) if m else None
+
+def _parse_energy_score(text: str):
+    m = re.search(r"energy\s*score.*?\b(\d+)\b", text, re.I | re.S)
+    return clean_number(m.group(1)) if m else None
+
+def _parse_resting_hr(text: str):
+    # catch "Resting HR: 54 bpm" OR "Avg. heart rate: 49 bpm"
+    m = re.search(r"(?:resting\s*hr|avg\.\s*heart\s*rate)\s*[: ]\s*(\d+)\s*bpm", text, re.I)
+    return clean_number(m.group(1)) if m else None
+
+def fallback_parse_sleep_fields(text: str):
+    return {
+        "sleep_score": _parse_sleep_score(text),
+        "energy_score": _parse_energy_score(text),
+        "duration_hr": _parse_duration_hours(text),
+        "resting_hr": _parse_resting_hr(text),
+        # keep notes minimal; the pep talk paragraph is noise
+        "notes": None
+    }
+
+# -------------------------------------------------------
+# JSON generation via LLM
 # -------------------------------------------------------
 def call_openai_for_json(user_text):
     system_prompt = (
-        "You are a JSON generator for a health tracking assistant. "
         "Return ONLY valid JSON with keys: "
-        "'container' (sleep|exercise|food|user), 'fields' (object), and 'notes' (string). "
-        "Output pure JSON, no text around it."
+        "'container' (sleep|exercise|food|user), "
+        "'fields' (object), and 'notes' (string). "
+        "Plain JSON, no markdown."
     )
     msgs = [
         {"role": "system", "content": system_prompt},
@@ -144,11 +199,22 @@ def call_openai_for_json(user_text):
     ]
     try:
         if openai_client:
-            resp = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=400)
+            resp = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=msgs,
+                max_tokens=300,
+                temperature=0.1,
+            )
             ai_text = resp.choices[0].message.content.strip()
         else:
-            resp = openai.ChatCompletion.create(model="gpt-4o-mini", messages=msgs, max_tokens=400)
+            resp = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=msgs,
+                max_tokens=300,
+                temperature=0.1,
+            )
             ai_text = resp.choices[0].message["content"].strip()
+
         parsed = json.loads(ai_text)
         return ai_text, parsed if isinstance(parsed, dict) else None
     except Exception as e:
@@ -156,16 +222,16 @@ def call_openai_for_json(user_text):
         return str(e), None
 
 # -------------------------------------------------------
-# Mapping
+# Mapping into DB rows
 # -------------------------------------------------------
 def map_payload(container, fields, chat_id):
     ts = now_iso()
-    user_id_str = str(chat_id)
+    user_id_str = str(chat_id)  # your schema uses UUID user_id but allows NULL; we store chat_id here as text
     date_val = fields.get("date") or ts[:10]
 
     if container == "sleep":
         return "sleep", {
-            "user_id": user_id_str,
+            "user_id": None,  # keep FK happy; use a proper UUID mapping later
             "date": date_val,
             "sleep_score": clean_number(fields.get("sleep_score")),
             "energy_score": clean_number(fields.get("energy_score")),
@@ -175,16 +241,17 @@ def map_payload(container, fields, chat_id):
         }
     if container == "exercise":
         return "exercise", {
-            "user_id": user_id_str,
+            "user_id": None,
             "date": date_val,
             "workout_name": fields.get("workout_name") or "Workout",
             "distance_km": clean_number(fields.get("distance_km")),
             "duration_min": clean_number(fields.get("duration_min") or fields.get("duration")),
             "calories_burned": clean_number(fields.get("calories_burned") or fields.get("calories_kcal")),
+            "notes": fields.get("notes"),
         }
     if container == "food":
         return "food", {
-            "user_id": user_id_str,
+            "user_id": None,
             "date": date_val,
             "meal_name": fields.get("meal_name") or fields.get("name"),
             "calories_kcal": clean_number(fields.get("calories_kcal")),
@@ -196,11 +263,19 @@ def map_payload(container, fields, chat_id):
     return None, None
 
 # -------------------------------------------------------
-# Router
+# Router with fallback for sleep
 # -------------------------------------------------------
-def route_to_container(parsed_json, chat_id):
+def route_to_container(original_text, parsed_json, chat_id):
+    # If LLM didn’t give a usable JSON, try fallback for sleep-like text
+    if not parsed_json:
+        # heuristics: Samsung sleep blobs always say "Sleep score" or "Sleep time"
+        if re.search(r"\bsleep\s+score\b|\bsleep\s+time\b", original_text, re.I):
+            fields = fallback_parse_sleep_fields(original_text)
+            parsed_json = {"container": "sleep", "fields": fields, "notes": ""}
+
     if not parsed_json or "container" not in parsed_json:
         return False, "no_container"
+
     container = parsed_json["container"]
     fields = parsed_json.get("fields", {}) or {}
     table, payload = map_payload(container, fields, chat_id)
@@ -230,7 +305,11 @@ def log_entry(chat_id, text, ai_text, parsed_json, status):
 
 def send_telegram_message(chat_id, text):
     try:
-        requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=10)
+        requests.post(
+            f"{TELEGRAM_API_URL}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=HTTP_TIMEOUT
+        )
     except Exception:
         logger.exception("Telegram send failed")
 
@@ -243,24 +322,44 @@ def index():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(force=True, silent=True)
+    data = request.get_json(force=True, silent=True) or {}
     msg = data.get("message") or data.get("edited_message") or {}
     chat_id = msg.get("chat", {}).get("id")
-    text = ""
+    if not chat_id:
+        return jsonify({"ok": True})
 
+    text = ""
     if "photo" in msg:
-        fid = msg["photo"][-1]["file_id"]
-        fpath = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
-        text = extract_text_from_image(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}") if fpath else "[OCR error]"
+        try:
+            fid = msg["photo"][-1]["file_id"]
+            meta = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=HTTP_TIMEOUT).json()
+            fpath = meta.get("result", {}).get("file_path")
+            if not fpath:
+                text = "[OCR error] Missing file path."
+            else:
+                text = extract_text_from_image(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}")
+        except Exception as e:
+            logger.exception("Telegram photo fetch failed")
+            text = f"[OCR error] {e}"
+
     elif "voice" in msg:
-        fid = msg["voice"]["file_id"]
-        fpath = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
-        text = transcribe_voice(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}") if fpath else "[Voice error]"
+        try:
+            fid = msg["voice"]["file_id"]
+            meta = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=HTTP_TIMEOUT).json()
+            fpath = meta.get("result", {}).get("file_path")
+            if not fpath:
+                text = "[Voice error] Missing file path."
+            else:
+                text = transcribe_voice(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}")
+        except Exception as e:
+            logger.exception("Telegram voice fetch failed")
+            text = f"[Voice error] {e}"
+
     else:
         text = msg.get("text", "")
 
     ai_text, parsed_json = call_openai_for_json(text)
-    ok, status = route_to_container(parsed_json, chat_id)
+    ok, status = route_to_container(text, parsed_json, chat_id)
     log_entry(chat_id, text, ai_text, parsed_json, status)
 
     preview = (text[:400] + "…") if len(text) > 400 else text
