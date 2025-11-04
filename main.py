@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, json, logging, requests, base64, re
+import os, json, logging, requests, base64, re, uuid
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 import openai
@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("yaha_bot")
 
 # -------------------------------------------------------
-# Env + setup
+# Environment setup
 # -------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
@@ -20,7 +20,7 @@ SUPABASE_ANON_KEY  = os.getenv("SUPABASE_ANON_KEY")
 app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# OpenAI client
+# OpenAI setup
 openai_client = None
 if OPENAI_API_KEY:
     try:
@@ -30,10 +30,12 @@ if OPENAI_API_KEY:
         openai.api_key = OPENAI_API_KEY
         openai_client = None
 
+
 # -------------------------------------------------------
-# Utilities
+# Utility functions
 # -------------------------------------------------------
-def now_iso(): return datetime.now(timezone.utc).isoformat()
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
 
 def sb_headers():
     return {
@@ -44,12 +46,13 @@ def sb_headers():
     }
 
 def clean_number(val):
-    if val is None: return None
-    val = str(val).strip()
-    # pick the first numeric in string
-    nums = re.findall(r"[-+]?\d*\.\d+|\d+", val)
-    try: return float(nums[0]) if nums else None
-    except: return None
+    if val is None:
+        return None
+    try:
+        nums = re.findall(r"[-+]?\d*\.\d+|\d+", str(val))
+        return float(nums[0]) if nums else None
+    except Exception:
+        return None
 
 def sb_post(path, payload):
     try:
@@ -62,17 +65,41 @@ def sb_post(path, payload):
         logger.error("Supabase POST exception: %s", e)
         return False
 
-# -------------------------------------------------------
-# Schema definitions
-# -------------------------------------------------------
-SCHEMA = {
-    "sleep": {"sleep_score": "float", "energy_score": "float", "duration_hr": "float", "resting_hr": "float", "notes": "string"},
-    "food": {"meal_name": "string", "calories": "float", "protein_g": "float", "carbs_g": "float", "fat_g": "float", "fiber_g": "float", "notes": "string"},
-    "exercise": {"workout_name": "string", "distance_km": "float", "duration_min": "float", "calories_burned": "float", "training_intensity": "float", "avg_hr": "float", "notes": "string"}
-}
 
 # -------------------------------------------------------
-# OCR + Voice
+# Schemas
+# -------------------------------------------------------
+SCHEMA = {
+    "sleep": {
+        "sleep_score": "float",
+        "energy_score": "float",
+        "duration_hr": "float",
+        "resting_hr": "float",
+        "notes": "string"
+    },
+    "food": {
+        "meal_name": "string",
+        "calories": "float",
+        "protein_g": "float",
+        "carbs_g": "float",
+        "fat_g": "float",
+        "fiber_g": "float",
+        "notes": "string"
+    },
+    "exercise": {
+        "workout_name": "string",
+        "distance_km": "float",
+        "duration_min": "float",
+        "calories_burned": "float",
+        "training_intensity": "float",
+        "avg_hr": "float",
+        "notes": "string"
+    }
+}
+
+
+# -------------------------------------------------------
+# OCR + Voice processing
 # -------------------------------------------------------
 def extract_text_from_image(file_url):
     try:
@@ -95,18 +122,20 @@ def extract_text_from_image(file_url):
         logger.error("OCR error: %s", e)
         return f"[OCR error] {e}"
 
+
 def transcribe_voice(file_url):
     try:
         data = requests.get(file_url, timeout=30).content
         ogg, wav = "/tmp/v.ogg", "/tmp/v.wav"
         with open(ogg, "wb") as f: f.write(data)
         AudioSegment.from_ogg(ogg).export(wav, format="wav")
-        rec = sr.Recognizer()
+        r = sr.Recognizer()
         with sr.AudioFile(wav) as src:
-            return rec.recognize_google(rec.record(src))
+            return r.recognize_google(r.record(src))
     except Exception as e:
         logger.error("Voice transcription failed: %s", e)
         return f"[Voice error] {e}"
+
 
 # -------------------------------------------------------
 # OpenAI structured extraction
@@ -143,26 +172,35 @@ def call_openai_for_json(user_text):
     cleaned = []
     for obj in parsed:
         c = obj.get("container")
-        if c not in SCHEMA: continue
-        fields, keep = {}, SCHEMA[c]
-        for key in keep.keys():
+        if c not in SCHEMA: 
+            continue
+        fields = {}
+        for key, dtype in SCHEMA[c].items():
             val = obj.get("fields", {}).get(key)
             if val not in (None, "", "null"):
-                val = clean_number(val) if keep[key] == "float" else val
-                if val not in (None, 0, "0"): fields[key] = val
+                if dtype == "float":
+                    val = clean_number(val)
+                if val not in (None, 0, "0"):
+                    fields[key] = val
         if fields:
             cleaned.append({"container": c, "fields": fields, "notes": obj.get("notes", "")})
     return json.dumps(cleaned), cleaned
+
 
 # -------------------------------------------------------
 # Data routing
 # -------------------------------------------------------
 def map_payload(container, fields, chat_id):
-    uid = str(chat_id)
-    base = {"user_id": uid, "date": datetime.now().strftime("%Y-%m-%d"),
-            "created_at": now_iso(), "recorded_at": now_iso()}
+    uid = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(chat_id)))  # deterministic UUID
+    base = {
+        "user_id": uid,
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "created_at": now_iso(),
+        "recorded_at": now_iso()
+    }
     base.update(fields)
     return container, base
+
 
 def route_to_container(parsed_json, chat_id):
     if not parsed_json:
@@ -172,12 +210,13 @@ def route_to_container(parsed_json, chat_id):
         c = obj.get("container")
         flds = obj.get("fields", {})
         table, payload = map_payload(c, flds, chat_id)
-        if not flds: 
+        if not flds:
             results.append((False, f"{c}:empty"))
             continue
         ok = sb_post(f"/rest/v1/{table}", payload)
         results.append((ok, f"{c}:ok" if ok else f"{c}:fail"))
     return results
+
 
 # -------------------------------------------------------
 # Telegram
@@ -189,45 +228,54 @@ def send_telegram_message(chat_id, text):
     except Exception as e:
         logger.error("Telegram send error: %s", e)
 
+
 # -------------------------------------------------------
 # Webhook
 # -------------------------------------------------------
 @app.route("/")
-def index(): return jsonify({"status": "ok"})
+def index():
+    return jsonify({"status": "ok"})
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(force=True, silent=True)
-    msg = data.get("message") or data.get("edited_message") or {}
-    chat_id = msg.get("chat", {}).get("id")
-    text = ""
+    try:
+        data = request.get_json(force=True, silent=True)
+        msg = data.get("message") or data.get("edited_message") or {}
+        chat_id = msg.get("chat", {}).get("id")
+        text = ""
 
-    if "photo" in msg:
-        fid = msg["photo"][-1]["file_id"]
-        fp = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
-        text = extract_text_from_image(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fp}") if fp else "[OCR error]"
-    elif "voice" in msg:
-        fid = msg["voice"]["file_id"]
-        fp = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
-        text = transcribe_voice(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fp}") if fp else "[Voice error]"
-    else:
-        text = msg.get("text", "")
+        if "photo" in msg:
+            fid = msg["photo"][-1]["file_id"]
+            fp = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
+            text = extract_text_from_image(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fp}") if fp else "[OCR error]"
+        elif "voice" in msg:
+            fid = msg["voice"]["file_id"]
+            fp = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
+            text = transcribe_voice(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fp}") if fp else "[Voice error]"
+        else:
+            text = msg.get("text", "")
 
-    ai_text, parsed = call_openai_for_json(text)
-    results = route_to_container(parsed, chat_id)
+        ai_text, parsed = call_openai_for_json(text)
+        results = route_to_container(parsed, chat_id)
 
-    # clean summary
-    preview = text[:300].replace("\n", " ")
-    summary = f"Processed: {preview}\n\n"
-    if parsed:
-        for p in parsed:
-            c = p['container']
-            fields = ", ".join(f"{k}:{v}" for k,v in p['fields'].items())
-            summary += f"✅ {c} → {fields}\n"
-    else:
-        summary += "⚠️ No valid container detected.\n"
-    send_telegram_message(chat_id, summary)
-    return jsonify({"ok": True})
+        # concise Telegram summary
+        preview = text[:300].replace("\n", " ")
+        summary = f"Processed: {preview}\n\n"
+        if parsed:
+            for p in parsed:
+                c = p['container']
+                fields = ", ".join(f"{k}:{v}" for k,v in p['fields'].items())
+                summary += f"✅ {c} → {fields}\n"
+        else:
+            summary += "⚠️ No valid container detected.\n"
+        send_telegram_message(chat_id, summary)
+        return jsonify({"ok": True})
+
+    except Exception as e:
+        logger.error("Webhook exception: %s", e)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 
 # -------------------------------------------------------
 # Run
