@@ -31,22 +31,13 @@ app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # -------------------------------------------------------
-# Hard allow-lists per table (so sanitizer can function even when tables are empty)
-# Match your Supabase defs: public.sleep / public.exercise / public.food
+# Table allow-lists (for sanitizer)
 # -------------------------------------------------------
 TABLE_COLUMNS = {
-    "sleep": {
-        "user_id", "date", "sleep_score", "energy_score", "duration_hr", "resting_hr", "notes"
-    },
-    "exercise": {
-        "user_id", "date", "workout_name", "distance_km", "duration_min", "calories_burned", "notes"
-    },
-    "food": {
-        "user_id", "date", "meal_name", "calories_kcal", "protein_g", "carbs_g", "fat_g", "notes"
-    },
-    "entries": {
-        "chat_id", "user_message", "ai_response", "parsed", "parsed_json", "created_at", "notes"
-    }
+    "sleep": {"user_id", "date", "sleep_score", "energy_score", "duration_hr", "resting_hr", "notes"},
+    "exercise": {"user_id", "date", "workout_name", "distance_km", "duration_min", "calories_burned", "notes"},
+    "food": {"user_id", "date", "meal_name", "calories_kcal", "protein_g", "carbs_g", "fat_g", "notes"},
+    "entries": {"chat_id", "user_message", "ai_response", "parsed", "parsed_json", "created_at", "notes"},
 }
 
 # -------------------------------------------------------
@@ -77,7 +68,6 @@ def clean_number(val):
 def sanitize_payload(payload, table):
     allowed = TABLE_COLUMNS.get(table, set())
     if not allowed:
-        # If we don’t know the table, just return payload as-is.
         return payload
     return {k: v for k, v in payload.items() if k in allowed and v is not None}
 
@@ -90,7 +80,7 @@ def sb_post(path, payload):
     return True
 
 # -------------------------------------------------------
-# OCR (OpenAI Vision) — keep tokens smaller to avoid sluggishness
+# OCR
 # -------------------------------------------------------
 def extract_text_from_image(file_url: str) -> str:
     try:
@@ -144,34 +134,33 @@ def transcribe_voice(file_url):
         return f"[Voice error] {e}"
 
 # -------------------------------------------------------
-# Fallback text parsers (Samsung-style sleep screenshots)
-# These run when LLM JSON is missing or useless.
+# Sleep fallback regex parser
 # -------------------------------------------------------
 def _parse_duration_hours(text: str):
-    # captures "5 h 23 m" or "7 h 34 m" into hours as float
     m = re.search(r"(\d+)\s*h\s*(\d+)\s*m", text, re.I)
     if not m:
         return None
     h, m_ = int(m.group(1)), int(m.group(2))
-    return round(h + m_/60.0, 2)
+    return round(h + m_ / 60.0, 2)
 
 def _parse_sleep_score(text: str):
-    # prefer "Sleep score" section: "56 - 35" -> take the first number (current)
-    m = re.search(r"sleep\s*score.*?\b(\d+)\b(?:\s*[-/]\s*\d+)?", text, re.I | re.S)
-    if m:
-        return clean_number(m.group(1))
-    # fallback: any lone "Sleep score" then next int
-    m = re.search(r"sleep\s*score.*?\b(\d+)\b", text, re.I | re.S)
-    return clean_number(m.group(1)) if m else None
+    m = re.search(r"sleep\s*score.*?(\d+(?:\.\d+)?)", text, re.I)
+    if not m:
+        return None
+    raw = m.group(1)
+    cleaned = re.findall(r"\d+", raw)
+    return float(cleaned[0]) if cleaned else None
 
 def _parse_energy_score(text: str):
-    m = re.search(r"energy\s*score.*?\b(\d+)\b", text, re.I | re.S)
-    return clean_number(m.group(1)) if m else None
+    m = re.search(r"energy\s*score.*?(\d+(?:\.\d+)?)", text, re.I)
+    if not m:
+        return None
+    cleaned = re.findall(r"\d+", m.group(1))
+    return float(cleaned[0]) if cleaned else None
 
 def _parse_resting_hr(text: str):
-    # catch "Resting HR: 54 bpm" OR "Avg. heart rate: 49 bpm"
-    m = re.search(r"(?:resting\s*hr|avg\.\s*heart\s*rate)\s*[: ]\s*(\d+)\s*bpm", text, re.I)
-    return clean_number(m.group(1)) if m else None
+    m = re.search(r"(?:resting\s*hr|avg\.\s*heart\s*rate)[: ]+\s*(\d+)", text, re.I)
+    return float(m.group(1)) if m else None
 
 def fallback_parse_sleep_fields(text: str):
     return {
@@ -179,12 +168,11 @@ def fallback_parse_sleep_fields(text: str):
         "energy_score": _parse_energy_score(text),
         "duration_hr": _parse_duration_hours(text),
         "resting_hr": _parse_resting_hr(text),
-        # keep notes minimal; the pep talk paragraph is noise
         "notes": None
     }
 
 # -------------------------------------------------------
-# JSON generation via LLM
+# JSON generation (OpenAI)
 # -------------------------------------------------------
 def call_openai_for_json(user_text):
     system_prompt = (
@@ -226,12 +214,12 @@ def call_openai_for_json(user_text):
 # -------------------------------------------------------
 def map_payload(container, fields, chat_id):
     ts = now_iso()
-    user_id_str = str(chat_id)  # your schema uses UUID user_id but allows NULL; we store chat_id here as text
+    user_id_str = str(chat_id)
     date_val = fields.get("date") or ts[:10]
 
     if container == "sleep":
         return "sleep", {
-            "user_id": None,  # keep FK happy; use a proper UUID mapping later
+            "user_id": None,
             "date": date_val,
             "sleep_score": clean_number(fields.get("sleep_score")),
             "energy_score": clean_number(fields.get("energy_score")),
@@ -263,12 +251,10 @@ def map_payload(container, fields, chat_id):
     return None, None
 
 # -------------------------------------------------------
-# Router with fallback for sleep
+# Router with sleep fallback
 # -------------------------------------------------------
 def route_to_container(original_text, parsed_json, chat_id):
-    # If LLM didn’t give a usable JSON, try fallback for sleep-like text
     if not parsed_json:
-        # heuristics: Samsung sleep blobs always say "Sleep score" or "Sleep time"
         if re.search(r"\bsleep\s+score\b|\bsleep\s+time\b", original_text, re.I):
             fields = fallback_parse_sleep_fields(original_text)
             parsed_json = {"container": "sleep", "fields": fields, "notes": ""}
