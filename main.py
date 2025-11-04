@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, json, logging, requests, base64, re, functools
+import os, json, logging, requests, base64, re, uuid, functools
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 import openai
@@ -30,7 +30,7 @@ app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # -------------------------------------------------------
-# Helpers
+# Utility functions
 # -------------------------------------------------------
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -55,7 +55,7 @@ def clean_number(val):
         return None
 
 # -------------------------------------------------------
-# Schema definitions (strict)
+# Schema (validated fields for each container)
 # -------------------------------------------------------
 SCHEMA = {
     "sleep": {
@@ -97,11 +97,11 @@ def sb_post(path, payload):
     try:
         r = requests.post(f"{SUPABASE_URL}{path}", headers=sb_headers(), json=payload, timeout=15)
         if r.status_code not in (200, 201):
-            logger.error("Supabase POST error: %s %s", r.status_code, r.text)
+            logger.error("Supabase POST error %s: %s", r.status_code, r.text)
             return False
         return True
     except Exception as e:
-        logger.error("Supabase POST error: %s", e)
+        logger.error("Supabase POST exception: %s", e)
         return False
 
 # -------------------------------------------------------
@@ -112,9 +112,9 @@ def extract_text_from_image(file_url: str):
         img = requests.get(file_url, timeout=20).content
         b64 = base64.b64encode(img).decode("ascii")
         msgs = [
-            {"role": "system", "content": "Extract visible text, no commentary."},
+            {"role": "system", "content": "Extract visible text only, no commentary."},
             {"role": "user", "content": [
-                {"type": "text", "text": "Extract all readable text accurately."},
+                {"type": "text", "text": "Extract all readable text clearly."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
             ]}
         ]
@@ -124,6 +124,7 @@ def extract_text_from_image(file_url: str):
         res = openai.ChatCompletion.create(model="gpt-4o-mini", messages=msgs, max_tokens=1500)
         return res.choices[0].message["content"].strip()
     except Exception as e:
+        logger.error("OCR error: %s", e)
         return f"[OCR error] {e}"
 
 def transcribe_voice(file_url):
@@ -136,21 +137,20 @@ def transcribe_voice(file_url):
         with sr.AudioFile(wav) as src:
             return r.recognize_google(r.record(src))
     except Exception as e:
+        logger.error("Voice transcription failed: %s", e)
         return f"[Voice error] {e}"
 
 # -------------------------------------------------------
-# OpenAI JSON generator + validation
+# AI JSON extractor
 # -------------------------------------------------------
 def call_openai_for_json(user_text):
     sys_prompt = (
-        "You are a structured data extractor for a health app.\n"
-        "Valid containers are: sleep, food, exercise.\n"
-        "Use these field maps:\n"
-        f"{json.dumps(SCHEMA, indent=2)}\n\n"
-        "Detect which containers apply from the text. "
-        "Return only those fields with numeric or short string values. "
-        "Output JSON ONLY. Example:\n"
-        "[{'container':'sleep','fields':{'sleep_score':88.2,'duration_hr':7.3},'notes':'summary'}]"
+        "You are a structured data extractor for a health tracking assistant.\n"
+        "Recognize and return JSON only for these containers: sleep, food, exercise.\n"
+        "Use the schema below:\n"
+        f"{json.dumps(SCHEMA, indent=2)}\n"
+        "Return a JSON list, example:\n"
+        "[{'container':'sleep','fields':{'sleep_score':88.3,'duration_hr':7.2},'notes':'summary'}]"
     )
 
     msgs = [{"role": "system", "content": sys_prompt},
@@ -165,47 +165,48 @@ def call_openai_for_json(user_text):
             text = res.choices[0].message["content"].strip()
         parsed = json.loads(text)
     except Exception as e:
-        logger.warning("AI parse fail: %s", e)
+        logger.warning("AI parse failed: %s", e)
         return str(e), None
-
-    def clean_fields(container, fields):
-        if container not in SCHEMA: return {}
-        valid = {}
-        for key, val_type in SCHEMA[container].items():
-            if key in fields:
-                try:
-                    if val_type == float:
-                        valid[key] = clean_number(fields[key])
-                    elif val_type == str:
-                        valid[key] = str(fields[key])
-                except Exception:
-                    continue
-        return valid
 
     if isinstance(parsed, dict):
         parsed = [parsed]
     cleaned = []
     for obj in parsed:
         c = obj.get("container")
-        fields = clean_fields(c, obj.get("fields", {}))
-        if c and fields:
+        if c not in SCHEMA:
+            continue
+        fields = {}
+        for key, val_type in SCHEMA[c].items():
+            if key in obj.get("fields", {}):
+                try:
+                    if val_type == float:
+                        fields[key] = clean_number(obj["fields"][key])
+                    elif val_type == str:
+                        fields[key] = str(obj["fields"][key])
+                except Exception:
+                    continue
+        if fields:
             cleaned.append({"container": c, "fields": fields, "notes": obj.get("notes", "")})
     return json.dumps(cleaned), cleaned
 
 # -------------------------------------------------------
-# Mapping + Routing
+# Data routing + mapping
 # -------------------------------------------------------
 def map_payload(container, fields, chat_id):
-    uid = str(chat_id)
+    uid = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(chat_id)))
     date_val = datetime.now().strftime("%Y-%m-%d")
-
-    base = {"user_id": uid, "date": date_val, "created_at": now_iso(), "recorded_at": now_iso()}
+    base = {
+        "user_id": uid,
+        "date": date_val,
+        "created_at": now_iso(),
+        "recorded_at": now_iso()
+    }
     base.update(fields)
     return container, base
 
 def route_to_container(parsed_json, chat_id):
     if not parsed_json:
-        return False, "no_data"
+        return [(False, "no_data")]
     results = []
     for obj in parsed_json:
         c = obj.get("container")
@@ -213,10 +214,10 @@ def route_to_container(parsed_json, chat_id):
         table, payload = map_payload(c, fields, chat_id)
         sanitized = sanitize_payload(payload, table)
         if not sanitized:
-            results.append((False, "empty_payload"))
+            results.append((False, f"{c}:empty_payload"))
             continue
         ok = sb_post(f"/rest/v1/{table}", sanitized)
-        results.append((ok, table if ok else "insert_failed"))
+        results.append((ok, f"{c}:ok" if ok else f"{c}:insert_failed"))
     return results
 
 # -------------------------------------------------------
@@ -226,7 +227,7 @@ def send_telegram_message(chat_id, text):
     try:
         requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=10)
     except Exception as e:
-        logger.error("Telegram send fail: %s", e)
+        logger.error("Telegram send error: %s", e)
 
 @app.route("/")
 def index():
@@ -254,8 +255,11 @@ def webhook():
     results = route_to_container(parsed_json, chat_id)
 
     summary = f"OCR/Transcript preview:\n{text[:400]}\n\nProcessed.\n"
+    if not parsed_json:
+        summary += "⚠️ Parsing failed — no valid data found.\n"
     for ok, label in results:
-        summary += f"✅ {label} logged.\n" if ok else f"⚠️ {label} failed.\n"
+        summary += f"✅ {label}\n" if ok else f"⚠️ {label}\n"
+
     send_telegram_message(chat_id, summary)
     return jsonify({"ok": True})
 
