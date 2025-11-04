@@ -6,9 +6,6 @@ import openai
 from pydub import AudioSegment
 import speech_recognition as sr
 
-# -------------------------------------------------------
-# Setup
-# -------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("yaha_bot")
 
@@ -17,6 +14,10 @@ OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL       = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_ANON_KEY  = os.getenv("SUPABASE_ANON_KEY")
 
+app = Flask(__name__)
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+
+# OpenAI setup
 openai_client = None
 if OPENAI_API_KEY:
     try:
@@ -26,11 +27,8 @@ if OPENAI_API_KEY:
         openai.api_key = OPENAI_API_KEY
         openai_client = None
 
-app = Flask(__name__)
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-
 # -------------------------------------------------------
-# Utility functions
+# Utility
 # -------------------------------------------------------
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -46,8 +44,6 @@ def sb_headers():
 def clean_number(val):
     if val is None:
         return None
-    if isinstance(val, (int, float)):
-        return val
     try:
         n = re.findall(r"[-+]?\d*\.\d+|\d+", str(val))
         return float(n[0]) if n else None
@@ -55,38 +51,16 @@ def clean_number(val):
         return None
 
 # -------------------------------------------------------
-# Schema (validated fields for each container)
+# Schema (converted to printable strings)
 # -------------------------------------------------------
 SCHEMA = {
-    "sleep": {
-        "sleep_score": float,
-        "energy_score": float,
-        "duration_hr": float,
-        "resting_hr": float,
-        "notes": str
-    },
-    "food": {
-        "meal_name": str,
-        "calories": float,
-        "protein_g": float,
-        "carbs_g": float,
-        "fat_g": float,
-        "fiber_g": float,
-        "notes": str
-    },
-    "exercise": {
-        "workout_name": str,
-        "distance_km": float,
-        "duration_min": float,
-        "calories_burned": float,
-        "training_intensity": float,
-        "avg_hr": float,
-        "notes": str
-    }
+    "sleep": {"sleep_score": "float", "energy_score": "float", "duration_hr": "float", "resting_hr": "float", "notes": "string"},
+    "food": {"meal_name": "string", "calories": "float", "protein_g": "float", "carbs_g": "float", "fat_g": "float", "fiber_g": "float", "notes": "string"},
+    "exercise": {"workout_name": "string", "distance_km": "float", "duration_min": "float", "calories_burned": "float", "training_intensity": "float", "avg_hr": "float", "notes": "string"}
 }
 
 @functools.lru_cache(maxsize=64)
-def fetch_table_columns(table: str):
+def fetch_table_columns(table):
     return list(SCHEMA.get(table, {}).keys())
 
 def sanitize_payload(payload, table):
@@ -107,7 +81,7 @@ def sb_post(path, payload):
 # -------------------------------------------------------
 # OCR + Voice
 # -------------------------------------------------------
-def extract_text_from_image(file_url: str):
+def extract_text_from_image(file_url):
     try:
         img = requests.get(file_url, timeout=20).content
         b64 = base64.b64encode(img).decode("ascii")
@@ -141,16 +115,16 @@ def transcribe_voice(file_url):
         return f"[Voice error] {e}"
 
 # -------------------------------------------------------
-# AI JSON extractor
+# AI JSON extractor (safe)
 # -------------------------------------------------------
 def call_openai_for_json(user_text):
+    schema_str = json.dumps(SCHEMA, indent=2)
     sys_prompt = (
         "You are a structured data extractor for a health tracking assistant.\n"
         "Recognize and return JSON only for these containers: sleep, food, exercise.\n"
-        "Use the schema below:\n"
-        f"{json.dumps(SCHEMA, indent=2)}\n"
-        "Return a JSON list, example:\n"
-        "[{'container':'sleep','fields':{'sleep_score':88.3,'duration_hr':7.2},'notes':'summary'}]"
+        f"Use this schema:\n{schema_str}\n"
+        "Return JSON list only. Example:\n"
+        "[{'container':'sleep','fields':{'sleep_score':88.3},'notes':'summary'}]"
     )
 
     msgs = [{"role": "system", "content": sys_prompt},
@@ -176,21 +150,17 @@ def call_openai_for_json(user_text):
         if c not in SCHEMA:
             continue
         fields = {}
-        for key, val_type in SCHEMA[c].items():
+        for key in SCHEMA[c].keys():
             if key in obj.get("fields", {}):
-                try:
-                    if val_type == float:
-                        fields[key] = clean_number(obj["fields"][key])
-                    elif val_type == str:
-                        fields[key] = str(obj["fields"][key])
-                except Exception:
-                    continue
+                val = obj["fields"][key]
+                if isinstance(val, (int, float, str)):
+                    fields[key] = val
         if fields:
             cleaned.append({"container": c, "fields": fields, "notes": obj.get("notes", "")})
     return json.dumps(cleaned), cleaned
 
 # -------------------------------------------------------
-# Data routing + mapping
+# Data routing
 # -------------------------------------------------------
 def map_payload(container, fields, chat_id):
     uid = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(chat_id)))
@@ -221,7 +191,7 @@ def route_to_container(parsed_json, chat_id):
     return results
 
 # -------------------------------------------------------
-# Telegram + Flask
+# Telegram
 # -------------------------------------------------------
 def send_telegram_message(chat_id, text):
     try:
@@ -229,39 +199,46 @@ def send_telegram_message(chat_id, text):
     except Exception as e:
         logger.error("Telegram send error: %s", e)
 
+# -------------------------------------------------------
+# Webhook
+# -------------------------------------------------------
 @app.route("/")
 def index():
     return jsonify({"status": "ok"})
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(force=True, silent=True)
-    msg = data.get("message") or data.get("edited_message") or {}
-    chat_id = msg.get("chat", {}).get("id")
-    text = ""
+    try:
+        data = request.get_json(force=True, silent=True)
+        msg = data.get("message") or data.get("edited_message") or {}
+        chat_id = msg.get("chat", {}).get("id")
+        text = ""
 
-    if "photo" in msg:
-        fid = msg["photo"][-1]["file_id"]
-        fpath = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
-        text = extract_text_from_image(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}") if fpath else "[OCR error]"
-    elif "voice" in msg:
-        fid = msg["voice"]["file_id"]
-        fpath = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
-        text = transcribe_voice(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}") if fpath else "[Voice error]"
-    else:
-        text = msg.get("text", "")
+        if "photo" in msg:
+            fid = msg["photo"][-1]["file_id"]
+            fpath = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
+            text = extract_text_from_image(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}") if fpath else "[OCR error]"
+        elif "voice" in msg:
+            fid = msg["voice"]["file_id"]
+            fpath = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
+            text = transcribe_voice(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}") if fpath else "[Voice error]"
+        else:
+            text = msg.get("text", "")
 
-    ai_text, parsed_json = call_openai_for_json(text)
-    results = route_to_container(parsed_json, chat_id)
+        ai_text, parsed_json = call_openai_for_json(text)
+        results = route_to_container(parsed_json, chat_id)
 
-    summary = f"OCR/Transcript preview:\n{text[:400]}\n\nProcessed.\n"
-    if not parsed_json:
-        summary += "⚠️ Parsing failed — no valid data found.\n"
-    for ok, label in results:
-        summary += f"✅ {label}\n" if ok else f"⚠️ {label}\n"
+        summary = f"OCR/Transcript preview:\n{text[:400]}\n\nProcessed.\n"
+        if not parsed_json:
+            summary += "⚠️ Parsing failed — no valid data found.\n"
+        for ok, label in results:
+            summary += f"✅ {label}\n" if ok else f"⚠️ {label}\n"
 
-    send_telegram_message(chat_id, summary)
-    return jsonify({"ok": True})
+        send_telegram_message(chat_id, summary)
+        return jsonify({"ok": True})
+    except Exception as e:
+        logger.error("Webhook exception: %s", e)
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 # -------------------------------------------------------
 # Run
