@@ -55,16 +55,18 @@ def clean_number(val):
         return None
 
 # -------------------------------------------------------
-# Static schema definitions (so sanitizer doesn’t blank)
+# Schema + Field Definitions
 # -------------------------------------------------------
+CONTAINER_FIELDS = {
+    "sleep": ["sleep_score", "energy_score", "duration_hr", "resting_hr", "notes"],
+    "food": ["meal_name", "calories", "protein_g", "carbs_g", "fat_g", "fiber_g", "notes"],
+    "exercise": ["workout_name", "distance_km", "duration_min", "calories_burned", "training_intensity", "avg_hr", "notes"],
+}
+
 SCHEMA_OVERRIDES = {
     "sleep": {"user_id","date","sleep_score","energy_score","duration_hr","resting_hr","notes","created_at","recorded_at"},
     "food": {"user_id","date","meal_name","calories","protein_g","carbs_g","fat_g","fiber_g","notes","created_at","recorded_at"},
     "exercise": {"user_id","date","workout_name","distance_km","duration_min","calories_burned","training_intensity","avg_hr","notes","created_at","recorded_at"},
-    "weight_history": {"user_id","weight_kg","recorded_at"},
-    "foodbank": {"user_id","name","calories","protein_g","carbs_g","fat_g","fiber_g","notes","created_at"},
-    "containers": {"user_id","name","created_at"},
-    "users": {"telegram_id","full_name"}
 }
 
 @functools.lru_cache(maxsize=64)
@@ -94,9 +96,9 @@ def extract_text_from_image(file_url: str):
         img = requests.get(file_url, timeout=20).content
         b64 = base64.b64encode(img).decode("ascii")
         msgs = [
-            {"role": "system", "content": "Extract only readable text. No commentary."},
+            {"role": "system", "content": "Extract readable text, no commentary."},
             {"role": "user", "content": [
-                {"type": "text", "text": "Extract text clearly and preserve layout."},
+                {"type": "text", "text": "Extract all readable text."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
             ]}
         ]
@@ -121,35 +123,39 @@ def transcribe_voice(file_url):
         return f"[Voice error] {e}"
 
 # -------------------------------------------------------
-# JSON generator (field filtering logic)
+# OpenAI JSON generator
 # -------------------------------------------------------
 def call_openai_for_json(user_text):
     sys_prompt = (
-        "You are a JSON generator for a health tracker. "
-        "Only extract fields that match one of the known containers: sleep, food, exercise, user. "
-        "Ignore unrelated text. Return valid JSON with keys: "
-        "'container', 'fields', 'notes'. Output JSON only."
+        "You are a data parser for a health tracking app. "
+        "You must detect which container(s) this message belongs to among: sleep, food, exercise. "
+        "For each relevant container, only extract the following fields: "
+        f"{json.dumps(CONTAINER_FIELDS)}. "
+        "Ignore any unrelated text. Return JSON in the form:\n"
+        "{'container':'sleep','fields':{...},'notes':'summary'}\n"
+        "If multiple containers appear, return a list of such objects. Output pure JSON only."
     )
+
     msgs = [{"role":"system","content":sys_prompt},{"role":"user","content":user_text}]
     try:
         if openai_client:
-            res = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=400)
+            res = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=700)
             text = res.choices[0].message.content.strip()
         else:
-            res = openai.ChatCompletion.create(model="gpt-4o-mini", messages=msgs, max_tokens=400)
+            res = openai.ChatCompletion.create(model="gpt-4o-mini", messages=msgs, max_tokens=700)
             text = res.choices[0].message["content"].strip()
         parsed = json.loads(text)
-        return text, parsed if isinstance(parsed, dict) else None
+        return text, parsed
     except Exception as e:
-        logger.warning("AI parse fail: %s", e)
+        logger.warning("AI JSON parse fail: %s", e)
         return str(e), None
 
 # -------------------------------------------------------
-# Mapping to Supabase payloads
+# Payload mapping
 # -------------------------------------------------------
 def map_payload(container, fields, chat_id):
     uid = str(chat_id)
-    date_val = fields.get("date") or datetime.now().strftime("%Y-%m-%d")
+    date_val = datetime.now().strftime("%Y-%m-%d")
 
     if container == "sleep":
         return "sleep", {
@@ -168,7 +174,7 @@ def map_payload(container, fields, chat_id):
         return "food", {
             "user_id": uid,
             "date": date_val,
-            "meal_name": fields.get("meal_name") or "Meal",
+            "meal_name": fields.get("meal_name"),
             "calories": clean_number(fields.get("calories")),
             "protein_g": clean_number(fields.get("protein_g")),
             "carbs_g": clean_number(fields.get("carbs_g")),
@@ -183,7 +189,7 @@ def map_payload(container, fields, chat_id):
         return "exercise", {
             "user_id": uid,
             "date": date_val,
-            "workout_name": fields.get("workout_name") or "Workout",
+            "workout_name": fields.get("workout_name"),
             "distance_km": clean_number(fields.get("distance_km")),
             "duration_min": clean_number(fields.get("duration_min")),
             "calories_burned": clean_number(fields.get("calories_burned")),
@@ -197,32 +203,31 @@ def map_payload(container, fields, chat_id):
     return None, None
 
 # -------------------------------------------------------
-# Router + logger
+# Routing + Telegram
 # -------------------------------------------------------
 def route_to_container(parsed_json, chat_id):
-    if not parsed_json or "container" not in parsed_json:
-        return False, "no_container"
-    c = parsed_json["container"]
-    fields = parsed_json.get("fields", {}) or {}
-    table, payload = map_payload(c, fields, chat_id)
-    if not table:
-        return False, "unknown_container"
-    sanitized = sanitize_payload(payload, table)
-    if not sanitized:
-        return False, "empty_payload"
-    ok = sb_post(f"/rest/v1/{table}", sanitized)
-    return ok, "insert_ok" if ok else "insert_failed"
+    if not parsed_json:
+        return False, "no_data"
 
-def log_entry(chat_id, text, ai_text, parsed_json, status):
-    sb_post("/rest/v1/entries", {
-        "chat_id": str(chat_id),
-        "user_message": text,
-        "ai_response": ai_text,
-        "parsed": bool(parsed_json),
-        "parsed_json": parsed_json,
-        "created_at": now_iso(),
-        "notes": status
-    })
+    # Allow either a list or single object
+    objs = parsed_json if isinstance(parsed_json, list) else [parsed_json]
+    results = []
+
+    for obj in objs:
+        c = obj.get("container")
+        fields = obj.get("fields", {}) or {}
+        table, payload = map_payload(c, fields, chat_id)
+        if not table:
+            results.append((False, "no_container"))
+            continue
+        sanitized = sanitize_payload(payload, table)
+        if not sanitized:
+            results.append((False, "empty_payload"))
+            continue
+        ok = sb_post(f"/rest/v1/{table}", sanitized)
+        results.append((ok, table if ok else "insert_failed"))
+
+    return results
 
 def send_telegram_message(chat_id, text):
     try:
@@ -231,7 +236,7 @@ def send_telegram_message(chat_id, text):
         logger.error("Telegram send fail: %s", e)
 
 # -------------------------------------------------------
-# Flask app
+# Flask
 # -------------------------------------------------------
 @app.route("/")
 def index():
@@ -256,15 +261,13 @@ def webhook():
         text = msg.get("text", "")
 
     ai_text, parsed_json = call_openai_for_json(text)
-    ok, status = route_to_container(parsed_json, chat_id)
-    log_entry(chat_id, text, ai_text, parsed_json, status)
+    results = route_to_container(parsed_json, chat_id)
 
-    preview = (text[:400] + "…") if len(text) > 400 else text
-    msg_txt = f"OCR/Transcript preview:\n{preview}\n\nProcessed.\n"
-    msg_txt += "✅ Logged successfully." if ok else f"⚠️ Insert failed: {status}."
-    if parsed_json and parsed_json.get("notes"):
-        msg_txt += f"\nNotes: {parsed_json['notes']}"
-    send_telegram_message(chat_id, msg_txt)
+    summary = f"OCR/Transcript preview:\n{text[:400]}\n\nProcessed.\n"
+    for ok, label in results:
+        summary += f"✅ {label} logged.\n" if ok else f"⚠️ {label} failed.\n"
+
+    send_telegram_message(chat_id, summary)
     return jsonify({"ok": True})
 
 # -------------------------------------------------------
