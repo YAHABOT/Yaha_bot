@@ -17,7 +17,9 @@ SUPABASE_ANON_KEY  = os.getenv("SUPABASE_ANON_KEY")
 app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# ---- OpenAI Setup ----
+# -------------------------------------------------------
+# OpenAI setup
+# -------------------------------------------------------
 openai_client = None
 if OPENAI_API_KEY:
     try:
@@ -27,7 +29,9 @@ if OPENAI_API_KEY:
         openai.api_key = OPENAI_API_KEY
         openai_client = None
 
-# ---- Helpers ----
+# -------------------------------------------------------
+# Helpers
+# -------------------------------------------------------
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -40,50 +44,86 @@ def sb_headers():
     }
 
 def clean_number(val):
-    if val is None: return None
+    if val is None:
+        return None
     try:
         n = re.findall(r"[-+]?\d*\.\d+|\d+", str(val))
         return float(n[0]) if n else None
     except Exception:
         return None
 
-# ---- Schema ----
+# -------------------------------------------------------
+# Schema
+# -------------------------------------------------------
 SCHEMA = {
-    "sleep": {"sleep_score":"float","energy_score":"float","duration_hr":"float","resting_hr":"float","notes":"string"},
-    "food": {"meal_name":"string","calories":"float","protein_g":"float","carbs_g":"float","fat_g":"float","fiber_g":"float","notes":"string"},
-    "exercise": {"workout_name":"string","distance_km":"float","duration_min":"float","calories_burned":"float","training_intensity":"float","avg_hr":"float","notes":"string"}
+    "sleep": {
+        "sleep_score": "float",
+        "energy_score": "float",
+        "duration_hr": "float",
+        "resting_hr": "float",
+        "notes": "string"
+    },
+    "food": {
+        "meal_name": "string",
+        "calories": "float",
+        "protein_g": "float",
+        "carbs_g": "float",
+        "fat_g": "float",
+        "fiber_g": "float",
+        "notes": "string"
+    },
+    "exercise": {
+        "workout_name": "string",
+        "distance_km": "float",
+        "duration_min": "float",
+        "calories_burned": "float",
+        "training_intensity": "float",
+        "avg_hr": "float",
+        "notes": "string"
+    }
 }
 
+@functools.lru_cache(maxsize=64)
+def fetch_table_columns(table):
+    return list(SCHEMA.get(table, {}).keys())
+
 def sanitize_payload(payload, table):
-    valid = set(SCHEMA.get(table, {}).keys())
+    valid = set(fetch_table_columns(table))
     return {k: v for k, v in payload.items() if k in valid and v not in (None, "", "null")}
 
 def sb_post(table, payload):
+    # ✅ FIXED URL (no double /rest/v1)
     url = f"{SUPABASE_URL}/rest/v1/{table}"
     try:
-        logger.info(f"POST → {url}\nPayload: {json.dumps(payload)}")
+        logger.info(f"Trying Supabase POST to: {url}")
+        logger.info(f"Payload: {json.dumps(payload)}")
+
         r = requests.post(url, headers=sb_headers(), json=payload, timeout=15)
-        logger.info(f"Supabase Response: {r.status_code} - {r.text}")
+        logger.info(f"Supabase response: {r.status_code} - {r.text}")
+
         if r.status_code not in (200, 201):
+            logger.error(f"Supabase POST error {r.status_code}: {r.text}")
             return False
         return True
     except Exception as e:
         logger.error(f"Supabase POST exception: {e}")
         return False
 
-# ---- OCR + Voice ----
+# -------------------------------------------------------
+# OCR + Voice
+# -------------------------------------------------------
 def extract_text_from_image(file_url):
     try:
         img = requests.get(file_url, timeout=20).content
         b64 = base64.b64encode(img).decode("ascii")
         msgs = [
-            {"role":"system","content":"Extract visible text only, no commentary."},
-            {"role":"user","content":[
-                {"type":"text","text":"Extract all readable text clearly."},
-                {"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}
+            {"role": "system", "content": "Extract visible text only, no commentary."},
+            {"role": "user", "content": [
+                {"type": "text", "text": "Extract all readable text clearly."},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
             ]}
         ]
-        res = openai_client.chat.completions.create(model="gpt-4o-mini",messages=msgs,max_tokens=1500)
+        res = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=1500)
         return res.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"OCR error: {e}")
@@ -93,7 +133,8 @@ def transcribe_voice(file_url):
     try:
         data = requests.get(file_url, timeout=30).content
         ogg, wav = "/tmp/v.ogg", "/tmp/v.wav"
-        with open(ogg,"wb") as f: f.write(data)
+        with open(ogg, "wb") as f:
+            f.write(data)
         AudioSegment.from_ogg(ogg).export(wav, format="wav")
         r = sr.Recognizer()
         with sr.AudioFile(wav) as src:
@@ -102,25 +143,51 @@ def transcribe_voice(file_url):
         logger.error(f"Voice transcription failed: {e}")
         return f"[Voice error] {e}"
 
-# ---- AI JSON Extractor ----
+# -------------------------------------------------------
+# AI JSON extractor
+# -------------------------------------------------------
 def call_openai_for_json(user_text):
     schema_str = json.dumps(SCHEMA, indent=2)
     sys_prompt = (
-        "You are a structured data extractor for a health tracker.\n"
-        f"Recognize and return JSON matching this schema:\n{schema_str}\n"
-        "Return JSON list only — each object has container, fields, notes."
+        "You are a structured data extractor for a health tracking assistant.\n"
+        f"Recognize and return JSON only for these containers: sleep, food, exercise.\n"
+        f"Schema:\n{schema_str}\n"
+        "Return JSON list only. Example:\n"
+        "[{'container':'sleep','fields':{'sleep_score':88.3},'notes':'summary'}]"
     )
-    msgs = [{"role":"system","content":sys_prompt},{"role":"user","content":user_text}]
+
+    msgs = [{"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_text}]
+
     try:
-        res = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=800)
-        txt = res.choices[0].message.content.strip()
-        parsed = json.loads(txt)
+        res = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=900)
+        text = res.choices[0].message.content.strip()
+        parsed = json.loads(text)
     except Exception as e:
         logger.warning(f"AI parse failed: {e}")
         return str(e), None
-    return txt, parsed if isinstance(parsed, list) else [parsed]
 
-# ---- Data Routing ----
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+
+    cleaned = []
+    for obj in parsed:
+        c = obj.get("container")
+        if c not in SCHEMA:
+            continue
+        fields = {}
+        for key in SCHEMA[c].keys():
+            if key in obj.get("fields", {}):
+                val = obj["fields"][key]
+                if isinstance(val, (int, float, str)):
+                    fields[key] = val
+        if fields:
+            cleaned.append({"container": c, "fields": fields, "notes": obj.get("notes", "")})
+    return json.dumps(cleaned), cleaned
+
+# -------------------------------------------------------
+# Data routing
+# -------------------------------------------------------
 def map_payload(container, fields, chat_id):
     uid = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(chat_id)))
     date_val = datetime.now().strftime("%Y-%m-%d")
@@ -134,26 +201,36 @@ def map_payload(container, fields, chat_id):
     return container, base
 
 def route_to_container(parsed_json, chat_id):
+    if not parsed_json:
+        return [(False, "no_data")]
     results = []
-    for obj in parsed_json or []:
+    for obj in parsed_json:
         c = obj.get("container")
         fields = obj.get("fields", {})
         table, payload = map_payload(c, fields, chat_id)
         sanitized = sanitize_payload(payload, table)
+        if not sanitized:
+            results.append((False, f"{c}:empty_payload"))
+            continue
         ok = sb_post(table, sanitized)
-        results.append((ok, c))
+        results.append((ok, f"{c}:ok" if ok else f"{c}:insert_failed"))
     return results
 
-# ---- Telegram ----
+# -------------------------------------------------------
+# Telegram
+# -------------------------------------------------------
 def send_telegram_message(chat_id, text):
     try:
-        requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={"chat_id":chat_id,"text":text}, timeout=10)
+        requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=10)
     except Exception as e:
         logger.error(f"Telegram send error: {e}")
 
-# ---- Webhook ----
+# -------------------------------------------------------
+# Webhook
+# -------------------------------------------------------
 @app.route("/")
-def index(): return jsonify({"status":"ok"})
+def index():
+    return jsonify({"status": "ok"})
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -165,27 +242,32 @@ def webhook():
 
         if "photo" in msg:
             fid = msg["photo"][-1]["file_id"]
-            fp = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}",timeout=10).json().get("result",{}).get("file_path")
-            text = extract_text_from_image(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fp}") if fp else "[OCR error]"
+            fpath = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
+            text = extract_text_from_image(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}") if fpath else "[OCR error]"
         elif "voice" in msg:
             fid = msg["voice"]["file_id"]
-            fp = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}",timeout=10).json().get("result",{}).get("file_path")
-            text = transcribe_voice(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fp}") if fp else "[Voice error]"
+            fpath = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
+            text = transcribe_voice(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}") if fpath else "[Voice error]"
         else:
-            text = msg.get("text","")
+            text = msg.get("text", "")
 
-        ai_text, parsed = call_openai_for_json(text)
-        results = route_to_container(parsed, chat_id)
+        ai_text, parsed_json = call_openai_for_json(text)
+        results = route_to_container(parsed_json, chat_id)
 
-        reply = f"OCR/Transcript preview:\n{text[:300]}\n\nProcessed:\n"
-        for ok, c in results:
-            reply += f"✅ {c} logged\n" if ok else f"⚠️ {c} failed\n"
-        send_telegram_message(chat_id, reply)
-        return jsonify({"ok":True})
+        summary = f"OCR/Transcript preview:\n{text[:400]}\n\nProcessed.\n"
+        if not parsed_json:
+            summary += "⚠️ Parsing failed — no valid data found.\n"
+        for ok, label in results:
+            summary += f"✅ {label}\n" if ok else f"⚠️ {label}\n"
+
+        send_telegram_message(chat_id, summary)
+        return jsonify({"ok": True})
     except Exception as e:
         logger.error(f"Webhook exception: {e}")
-        return jsonify({"ok":False,"error":str(e)}), 500
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-# ---- Run ----
+# -------------------------------------------------------
+# Run
+# -------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
