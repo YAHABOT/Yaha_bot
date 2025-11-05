@@ -32,7 +32,7 @@ if OPENAI_API_KEY:
 
 
 # -------------------------------------------------------
-# Utility functions
+# Utilities
 # -------------------------------------------------------
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -54,20 +54,25 @@ def clean_number(val):
     except Exception:
         return None
 
+
+# -------------------------------------------------------
+# Verbose Supabase POST (fix #3)
+# -------------------------------------------------------
 def sb_post(path, payload):
+    url = f"{SUPABASE_URL}{path}"
     try:
-        r = requests.post(f"{SUPABASE_URL}{path}", headers=sb_headers(), json=payload, timeout=15)
+        r = requests.post(url, headers=sb_headers(), json=payload, timeout=15)
+        logger.info(f"POST {url} -> {r.status_code}: {r.text}")
         if r.status_code not in (200, 201):
-            logger.error("Supabase insert failed %s: %s", r.status_code, r.text)
             return False
         return True
     except Exception as e:
-        logger.error("Supabase POST exception: %s", e)
+        logger.error(f"Supabase POST exception: {e}")
         return False
 
 
 # -------------------------------------------------------
-# Schemas
+# Schema definitions
 # -------------------------------------------------------
 SCHEMA = {
     "sleep": {
@@ -99,7 +104,7 @@ SCHEMA = {
 
 
 # -------------------------------------------------------
-# OCR + Voice processing
+# OCR + Voice
 # -------------------------------------------------------
 def extract_text_from_image(file_url):
     try:
@@ -138,7 +143,7 @@ def transcribe_voice(file_url):
 
 
 # -------------------------------------------------------
-# OpenAI structured extraction
+# OpenAI structured extraction (with food fallback)
 # -------------------------------------------------------
 def call_openai_for_json(user_text):
     schema_str = json.dumps(SCHEMA, indent=2)
@@ -146,6 +151,7 @@ def call_openai_for_json(user_text):
         "You are a structured data extractor for a health tracker. "
         "Return ONLY valid JSON, one object per container in this schema:\n"
         f"{schema_str}\n"
+        "If nutritional data (Calories, Protein, Carbs, Fat) is detected, assume container='food'. "
         "Never guess missing fields. Ignore irrelevant text. "
         "Example output:\n"
         "[{'container':'sleep','fields':{'sleep_score':88.3},'notes':'summary'}]"
@@ -171,8 +177,8 @@ def call_openai_for_json(user_text):
 
     cleaned = []
     for obj in parsed:
-        c = obj.get("container")
-        if c not in SCHEMA: 
+        c = str(obj.get("container", "")).lower().strip()   # fix #2 lowercase normalize
+        if c not in SCHEMA:
             continue
         fields = {}
         for key, dtype in SCHEMA[c].items():
@@ -213,7 +219,7 @@ def route_to_container(parsed_json, chat_id):
         if not flds:
             results.append((False, f"{c}:empty"))
             continue
-        ok = sb_post(f"/rest/v1/{table}", payload)
+        ok = sb_post(f"/{table}", payload)
         results.append((ok, f"{c}:ok" if ok else f"{c}:fail"))
     return results
 
