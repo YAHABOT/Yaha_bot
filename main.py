@@ -9,6 +9,9 @@ import speech_recognition as sr
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("yaha_bot")
 
+# --------------------------------------------------------------------
+# ENVIRONMENT CONFIG
+# --------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL       = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -17,9 +20,9 @@ SUPABASE_ANON_KEY  = os.getenv("SUPABASE_ANON_KEY")
 app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# -------------------------------------------------------
-# OpenAI setup
-# -------------------------------------------------------
+# --------------------------------------------------------------------
+# OPENAI SETUP
+# --------------------------------------------------------------------
 openai_client = None
 if OPENAI_API_KEY:
     try:
@@ -29,9 +32,9 @@ if OPENAI_API_KEY:
         openai.api_key = OPENAI_API_KEY
         openai_client = None
 
-# -------------------------------------------------------
-# Helpers
-# -------------------------------------------------------
+# --------------------------------------------------------------------
+# HELPERS
+# --------------------------------------------------------------------
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -44,6 +47,7 @@ def sb_headers():
     }
 
 def clean_number(val):
+    """Extract first numeric value from messy OCR strings"""
     if val is None:
         return None
     try:
@@ -52,9 +56,9 @@ def clean_number(val):
     except Exception:
         return None
 
-# -------------------------------------------------------
-# Schema
-# -------------------------------------------------------
+# --------------------------------------------------------------------
+# SCHEMA (validated containers)
+# --------------------------------------------------------------------
 SCHEMA = {
     "sleep": {
         "sleep_score": "float",
@@ -88,31 +92,44 @@ def fetch_table_columns(table):
     return list(SCHEMA.get(table, {}).keys())
 
 def sanitize_payload(payload, table):
+    """Filter only valid fields + normalize number types"""
     valid = set(fetch_table_columns(table))
-    return {k: v for k, v in payload.items() if k in valid and v not in (None, "", "null")}
+    cleaned = {}
+    for k, v in payload.items():
+        if k not in valid or v in (None, "", "null"):
+            continue
+        # Normalize numbers
+        if isinstance(v, str):
+            try:
+                num = float(v.replace(",", "."))
+                cleaned[k] = num
+                continue
+            except Exception:
+                pass
+        cleaned[k] = v
+    return cleaned
 
-def sb_post(table, payload):
-    # ✅ FIXED URL (no double /rest/v1)
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
+def sb_post(path, payload):
+    """Write to Supabase"""
     try:
-        logger.info(f"Trying Supabase POST to: {url}")
-        logger.info(f"Payload: {json.dumps(payload)}")
-
+        url = f"{SUPABASE_URL}/rest/v1/{path.lstrip('/')}"
+        logger.info(f"INFO:yaha_bot:Trying Supabase POST to: {url}")
+        logger.info(f"INFO:yaha_bot:Payload: {json.dumps(payload)}")
         r = requests.post(url, headers=sb_headers(), json=payload, timeout=15)
-        logger.info(f"Supabase response: {r.status_code} - {r.text}")
-
         if r.status_code not in (200, 201):
-            logger.error(f"Supabase POST error {r.status_code}: {r.text}")
+            logger.error(f"ERROR:yaha_bot:Supabase POST error {r.status_code}: {r.text}")
             return False
+        logger.info(f"INFO:yaha_bot:Supabase response: {r.text}")
         return True
     except Exception as e:
-        logger.error(f"Supabase POST exception: {e}")
+        logger.error(f"ERROR:yaha_bot:Supabase POST exception: {e}")
         return False
 
-# -------------------------------------------------------
-# OCR + Voice
-# -------------------------------------------------------
+# --------------------------------------------------------------------
+# OCR + VOICE
+# --------------------------------------------------------------------
 def extract_text_from_image(file_url):
+    """OCR using GPT-4o-mini"""
     try:
         img = requests.get(file_url, timeout=20).content
         b64 = base64.b64encode(img).decode("ascii")
@@ -123,45 +140,54 @@ def extract_text_from_image(file_url):
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
             ]}
         ]
-        res = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=1500)
-        return res.choices[0].message.content.strip()
+        if openai_client:
+            res = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=1500)
+            return res.choices[0].message.content.strip()
+        else:
+            res = openai.ChatCompletion.create(model="gpt-4o-mini", messages=msgs, max_tokens=1500)
+            return res.choices[0].message["content"].strip()
     except Exception as e:
-        logger.error(f"OCR error: {e}")
+        logger.error("OCR error: %s", e)
         return f"[OCR error] {e}"
 
 def transcribe_voice(file_url):
+    """Speech-to-text using pydub + Google recognizer"""
     try:
         data = requests.get(file_url, timeout=30).content
         ogg, wav = "/tmp/v.ogg", "/tmp/v.wav"
-        with open(ogg, "wb") as f:
-            f.write(data)
+        with open(ogg, "wb") as f: f.write(data)
         AudioSegment.from_ogg(ogg).export(wav, format="wav")
         r = sr.Recognizer()
         with sr.AudioFile(wav) as src:
             return r.recognize_google(r.record(src))
     except Exception as e:
-        logger.error(f"Voice transcription failed: {e}")
+        logger.error("Voice transcription failed: %s", e)
         return f"[Voice error] {e}"
 
-# -------------------------------------------------------
-# AI JSON extractor
-# -------------------------------------------------------
+# --------------------------------------------------------------------
+# OPENAI JSON EXTRACTOR
+# --------------------------------------------------------------------
 def call_openai_for_json(user_text):
     schema_str = json.dumps(SCHEMA, indent=2)
     sys_prompt = (
         "You are a structured data extractor for a health tracking assistant.\n"
-        f"Recognize and return JSON only for these containers: sleep, food, exercise.\n"
+        "Recognize and return JSON only for these containers: sleep, food, exercise.\n"
         f"Schema:\n{schema_str}\n"
         "Return JSON list only. Example:\n"
         "[{'container':'sleep','fields':{'sleep_score':88.3},'notes':'summary'}]"
     )
-
-    msgs = [{"role": "system", "content": sys_prompt},
-            {"role": "user", "content": user_text}]
+    msgs = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": user_text}
+    ]
 
     try:
-        res = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=900)
-        text = res.choices[0].message.content.strip()
+        if openai_client:
+            res = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=900)
+            text = res.choices[0].message.content.strip()
+        else:
+            res = openai.ChatCompletion.create(model="gpt-4o-mini", messages=msgs, max_tokens=900)
+            text = res.choices[0].message["content"].strip()
         parsed = json.loads(text)
     except Exception as e:
         logger.warning(f"AI parse failed: {e}")
@@ -185,14 +211,15 @@ def call_openai_for_json(user_text):
             cleaned.append({"container": c, "fields": fields, "notes": obj.get("notes", "")})
     return json.dumps(cleaned), cleaned
 
-# -------------------------------------------------------
-# Data routing
-# -------------------------------------------------------
+# --------------------------------------------------------------------
+# DATA ROUTING
+# --------------------------------------------------------------------
 def map_payload(container, fields, chat_id):
-    uid = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(chat_id)))
+    # Bind chat_id deterministically so all of one user's inserts share same ID
+    user_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"yaha_{chat_id}"))
     date_val = datetime.now().strftime("%Y-%m-%d")
     base = {
-        "user_id": uid,
+        "user_id": user_uuid,
         "date": date_val,
         "created_at": now_iso(),
         "recorded_at": now_iso()
@@ -203,6 +230,7 @@ def map_payload(container, fields, chat_id):
 def route_to_container(parsed_json, chat_id):
     if not parsed_json:
         return [(False, "no_data")]
+
     results = []
     for obj in parsed_json:
         c = obj.get("container")
@@ -212,22 +240,26 @@ def route_to_container(parsed_json, chat_id):
         if not sanitized:
             results.append((False, f"{c}:empty_payload"))
             continue
-        ok = sb_post(table, sanitized)
+        ok = sb_post(f"{table}", sanitized)
         results.append((ok, f"{c}:ok" if ok else f"{c}:insert_failed"))
     return results
 
-# -------------------------------------------------------
-# Telegram
-# -------------------------------------------------------
+# --------------------------------------------------------------------
+# TELEGRAM
+# --------------------------------------------------------------------
 def send_telegram_message(chat_id, text):
     try:
-        requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=10)
+        requests.post(
+            f"{TELEGRAM_API_URL}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=10
+        )
     except Exception as e:
-        logger.error(f"Telegram send error: {e}")
+        logger.error("Telegram send error: %s", e)
 
-# -------------------------------------------------------
-# Webhook
-# -------------------------------------------------------
+# --------------------------------------------------------------------
+# FLASK WEBHOOK
+# --------------------------------------------------------------------
 @app.route("/")
 def index():
     return jsonify({"status": "ok"})
@@ -266,8 +298,8 @@ def webhook():
         logger.error(f"Webhook exception: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
-# -------------------------------------------------------
-# Run
-# -------------------------------------------------------
+# --------------------------------------------------------------------
+# RUN APP
+# --------------------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
