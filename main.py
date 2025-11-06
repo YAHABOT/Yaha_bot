@@ -9,6 +9,9 @@ import speech_recognition as sr
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("yaha_bot")
 
+# -------------------------------------------------------
+# ENV VARS
+# -------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL       = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -18,18 +21,26 @@ GPT_PROMPT_ID      = os.getenv("GPT_PROMPT_ID")
 app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# OpenAI setup
-openai_client = None
-if OPENAI_API_KEY:
+# -------------------------------------------------------
+# GPT HANDSHAKE TEST (runs on startup)
+# -------------------------------------------------------
+def gpt_handshake_test():
     try:
-        from openai import OpenAI as OpenAIClient
-        openai_client = OpenAIClient(api_key=OPENAI_API_KEY)
-    except Exception:
-        openai.api_key = OPENAI_API_KEY
-        openai_client = None
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        if GPT_PROMPT_ID:
+            resp = client.responses.create(
+                prompt={"id": GPT_PROMPT_ID, "version": "1"},
+                input="Ping test from Render — confirm connection alive."
+            )
+            logger.info("✅ GPT handshake: %s", resp.output_text)
+        else:
+            logger.warning("⚠️ GPT_PROMPT_ID not set.")
+    except Exception as e:
+        logger.error("❌ GPT handshake failed: %s", e)
 
 # -------------------------------------------------------
-# Utilities
+# UTILITIES
 # -------------------------------------------------------
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -52,31 +63,7 @@ def clean_number(val):
         return None
 
 # -------------------------------------------------------
-# 🧠 GPT Diagnostic Helper
-# -------------------------------------------------------
-def run_yaha_diagnostic(log_excerpt: str, chat_id=None):
-    """Send Supabase/Render error snippet to the YAHA Developer Assistant GPT."""
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        prompt_id = os.getenv("GPT_PROMPT_ID")
-
-        response = client.responses.create(
-            prompt={"id": prompt_id, "version": "1"},
-            input=f"Render or Supabase log excerpt:\n\n{log_excerpt}\n\nExplain cause and provide a fix.",
-            max_output_tokens=500
-        )
-        text = response.output_text.strip()
-        logger.info(f"YAHA GPT Diagnostic → {text}")
-        if chat_id:
-            send_telegram_message(chat_id, f"⚙️ YAHA Diagnostic:\n{text}")
-        return text
-    except Exception as e:
-        logger.error(f"YAHA diagnostic failed: {e}")
-        return f"[Diagnostic error] {e}"
-
-# -------------------------------------------------------
-# Schema
+# SCHEMA
 # -------------------------------------------------------
 SCHEMA = {
     "sleep": {"sleep_score": "float", "energy_score": "float", "duration_hr": "float", "resting_hr": "float", "notes": "string"},
@@ -92,29 +79,23 @@ def sanitize_payload(payload, table):
     valid = set(fetch_table_columns(table))
     return {k: v for k, v in payload.items() if k in valid and v not in (None, "", "null")}
 
-# -------------------------------------------------------
-# Supabase POST
-# -------------------------------------------------------
-def sb_post(table, payload, chat_id=None):
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
-    logger.info(f"yaha_bot:Trying Supabase POST to: {url}")
-    logger.info(f"yaha_bot:Payload: {json.dumps(payload)}")
-
+def sb_post(table, payload):
     try:
+        url = f"{SUPABASE_URL}/rest/v1/{table}"
+        logger.info("INFO:yaha_bot:Trying Supabase POST to %s", url)
+        logger.info("INFO:yaha_bot:Payload: %s", json.dumps(payload))
         r = requests.post(url, headers=sb_headers(), json=payload, timeout=15)
         if r.status_code not in (200, 201):
-            logger.error(f"yaha_bot:Supabase POST error {r.status_code}: {r.text}")
-            run_yaha_diagnostic(f"Supabase POST error {r.status_code}: {r.text}", chat_id)
+            logger.error("ERROR:yaha_bot:Supabase POST error %s: %s", r.status_code, r.text)
             return False
-        logger.info(f"yaha_bot:Supabase response: {r.text}")
+        logger.info("INFO:yaha_bot:Supabase response: %s", r.text)
         return True
     except Exception as e:
-        logger.error(f"Supabase POST exception: {e}")
-        run_yaha_diagnostic(str(e), chat_id)
+        logger.error("ERROR:yaha_bot:Supabase POST exception: %s", e)
         return False
 
 # -------------------------------------------------------
-# OCR + Voice
+# OCR / VOICE
 # -------------------------------------------------------
 def extract_text_from_image(file_url):
     try:
@@ -127,11 +108,9 @@ def extract_text_from_image(file_url):
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
             ]}
         ]
-        if openai_client:
-            res = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=1500)
-            return res.choices[0].message.content.strip()
-        res = openai.ChatCompletion.create(model="gpt-4o-mini", messages=msgs, max_tokens=1500)
-        return res.choices[0].message["content"].strip()
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        res = client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=1500)
+        return res.choices[0].message.content.strip()
     except Exception as e:
         logger.error("OCR error: %s", e)
         return f"[OCR error] {e}"
@@ -150,7 +129,7 @@ def transcribe_voice(file_url):
         return f"[Voice error] {e}"
 
 # -------------------------------------------------------
-# AI JSON extractor
+# AI JSON EXTRACTOR
 # -------------------------------------------------------
 def call_openai_for_json(user_text):
     schema_str = json.dumps(SCHEMA, indent=2)
@@ -166,12 +145,9 @@ def call_openai_for_json(user_text):
             {"role": "user", "content": user_text}]
 
     try:
-        if openai_client:
-            res = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=900)
-            text = res.choices[0].message.content.strip()
-        else:
-            res = openai.ChatCompletion.create(model="gpt-4o-mini", messages=msgs, max_tokens=900)
-            text = res.choices[0].message["content"].strip()
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        res = client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=900)
+        text = res.choices[0].message.content.strip()
         parsed = json.loads(text)
     except Exception as e:
         logger.warning("AI parse failed: %s", e)
@@ -195,7 +171,7 @@ def call_openai_for_json(user_text):
     return json.dumps(cleaned), cleaned
 
 # -------------------------------------------------------
-# Data routing
+# ROUTING
 # -------------------------------------------------------
 def map_payload(container, fields, chat_id):
     uid = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(chat_id)))
@@ -221,12 +197,12 @@ def route_to_container(parsed_json, chat_id):
         if not sanitized:
             results.append((False, f"{c}:empty_payload"))
             continue
-        ok = sb_post(table, sanitized, chat_id)
+        ok = sb_post(table, sanitized)
         results.append((ok, f"{c}:ok" if ok else f"{c}:insert_failed"))
     return results
 
 # -------------------------------------------------------
-# Telegram
+# TELEGRAM
 # -------------------------------------------------------
 def send_telegram_message(chat_id, text):
     try:
@@ -235,7 +211,7 @@ def send_telegram_message(chat_id, text):
         logger.error("Telegram send error: %s", e)
 
 # -------------------------------------------------------
-# Webhook
+# WEBHOOK
 # -------------------------------------------------------
 @app.route("/")
 def index():
@@ -273,11 +249,11 @@ def webhook():
         return jsonify({"ok": True})
     except Exception as e:
         logger.error("Webhook exception: %s", e)
-        run_yaha_diagnostic(str(e))
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # -------------------------------------------------------
-# Run
+# RUN APP
 # -------------------------------------------------------
 if __name__ == "__main__":
+    gpt_handshake_test()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
