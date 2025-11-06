@@ -19,10 +19,9 @@ app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # -------------------------------------------------------
-# GPT HANDSHAKE
+# GPT HANDSHAKE runs immediately on import (once per worker)
 # -------------------------------------------------------
 def gpt_handshake_test():
-    time.sleep(5)
     logger.info("🧠 Starting GPT handshake test...")
     try:
         from openai import OpenAI
@@ -41,8 +40,14 @@ def gpt_handshake_test():
     except Exception as e:
         logger.error("❌ GPT handshake failed: %s", e, exc_info=True)
 
+# Trigger it right now, once, when the worker boots
+try:
+    gpt_handshake_test()
+except Exception as e:
+    logger.error("GPT handshake could not start: %s", e)
+
 # -------------------------------------------------------
-# UTILITIES
+# UTILITIES + REST identical to before
 # -------------------------------------------------------
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -54,15 +59,6 @@ def sb_headers():
         "Content-Type": "application/json",
         "Prefer": "return=representation",
     }
-
-def clean_number(val):
-    if val is None:
-        return None
-    try:
-        n = re.findall(r"[-+]?\d*\.\d+|\d+", str(val))
-        return float(n[0]) if n else None
-    except Exception:
-        return None
 
 SCHEMA = {
     "sleep": {"sleep_score": "float", "energy_score": "float", "duration_hr": "float", "resting_hr": "float", "notes": "string"},
@@ -93,7 +89,7 @@ def sb_post(table, payload):
         return False
 
 # -------------------------------------------------------
-# TELEGRAM + OCR
+# TELEGRAM OCR & PARSING
 # -------------------------------------------------------
 def extract_text_from_image(file_url):
     try:
@@ -153,7 +149,7 @@ def call_openai_for_json(user_text):
     return json.dumps(cleaned), cleaned
 
 # -------------------------------------------------------
-# MAIN ROUTES
+# ROUTES
 # -------------------------------------------------------
 @app.route("/")
 def index():
@@ -190,12 +186,3 @@ def webhook():
     except Exception as e:
         logger.error("Webhook error: %s", e, exc_info=True)
         return jsonify({"ok": False, "error": str(e)}), 500
-
-# -------------------------------------------------------
-# RUN
-# -------------------------------------------------------
-if __name__ == "__main__":
-    logger.info("🚀 Server starting...")
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
-    # when Flask starts, run handshake inline
-    gpt_handshake_test()
