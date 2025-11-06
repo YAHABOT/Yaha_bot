@@ -9,20 +9,16 @@ import speech_recognition as sr
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("yaha_bot")
 
-# --------------------------------------------------------------------
-# ENVIRONMENT CONFIG
-# --------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL       = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_ANON_KEY  = os.getenv("SUPABASE_ANON_KEY")
+GPT_PROMPT_ID      = os.getenv("GPT_PROMPT_ID")
 
 app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# --------------------------------------------------------------------
-# OPENAI SETUP
-# --------------------------------------------------------------------
+# OpenAI setup
 openai_client = None
 if OPENAI_API_KEY:
     try:
@@ -32,9 +28,9 @@ if OPENAI_API_KEY:
         openai.api_key = OPENAI_API_KEY
         openai_client = None
 
-# --------------------------------------------------------------------
-# HELPERS
-# --------------------------------------------------------------------
+# -------------------------------------------------------
+# Utilities
+# -------------------------------------------------------
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -47,7 +43,6 @@ def sb_headers():
     }
 
 def clean_number(val):
-    """Extract first numeric value from messy OCR strings"""
     if val is None:
         return None
     try:
@@ -56,35 +51,37 @@ def clean_number(val):
     except Exception:
         return None
 
-# --------------------------------------------------------------------
-# SCHEMA (validated containers)
-# --------------------------------------------------------------------
+# -------------------------------------------------------
+# 🧠 GPT Diagnostic Helper
+# -------------------------------------------------------
+def run_yaha_diagnostic(log_excerpt: str, chat_id=None):
+    """Send Supabase/Render error snippet to the YAHA Developer Assistant GPT."""
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        prompt_id = os.getenv("GPT_PROMPT_ID")
+
+        response = client.responses.create(
+            prompt={"id": prompt_id, "version": "1"},
+            input=f"Render or Supabase log excerpt:\n\n{log_excerpt}\n\nExplain cause and provide a fix.",
+            max_output_tokens=500
+        )
+        text = response.output_text.strip()
+        logger.info(f"YAHA GPT Diagnostic → {text}")
+        if chat_id:
+            send_telegram_message(chat_id, f"⚙️ YAHA Diagnostic:\n{text}")
+        return text
+    except Exception as e:
+        logger.error(f"YAHA diagnostic failed: {e}")
+        return f"[Diagnostic error] {e}"
+
+# -------------------------------------------------------
+# Schema
+# -------------------------------------------------------
 SCHEMA = {
-    "sleep": {
-        "sleep_score": "float",
-        "energy_score": "float",
-        "duration_hr": "float",
-        "resting_hr": "float",
-        "notes": "string"
-    },
-    "food": {
-        "meal_name": "string",
-        "calories": "float",
-        "protein_g": "float",
-        "carbs_g": "float",
-        "fat_g": "float",
-        "fiber_g": "float",
-        "notes": "string"
-    },
-    "exercise": {
-        "workout_name": "string",
-        "distance_km": "float",
-        "duration_min": "float",
-        "calories_burned": "float",
-        "training_intensity": "float",
-        "avg_hr": "float",
-        "notes": "string"
-    }
+    "sleep": {"sleep_score": "float", "energy_score": "float", "duration_hr": "float", "resting_hr": "float", "notes": "string"},
+    "food": {"meal_name": "string", "calories": "float", "protein_g": "float", "carbs_g": "float", "fat_g": "float", "fiber_g": "float", "notes": "string"},
+    "exercise": {"workout_name": "string", "distance_km": "float", "duration_min": "float", "calories_burned": "float", "training_intensity": "float", "avg_hr": "float", "notes": "string"}
 }
 
 @functools.lru_cache(maxsize=64)
@@ -92,44 +89,34 @@ def fetch_table_columns(table):
     return list(SCHEMA.get(table, {}).keys())
 
 def sanitize_payload(payload, table):
-    """Filter only valid fields + normalize number types"""
     valid = set(fetch_table_columns(table))
-    cleaned = {}
-    for k, v in payload.items():
-        if k not in valid or v in (None, "", "null"):
-            continue
-        # Normalize numbers
-        if isinstance(v, str):
-            try:
-                num = float(v.replace(",", "."))
-                cleaned[k] = num
-                continue
-            except Exception:
-                pass
-        cleaned[k] = v
-    return cleaned
+    return {k: v for k, v in payload.items() if k in valid and v not in (None, "", "null")}
 
-def sb_post(path, payload):
-    """Write to Supabase"""
+# -------------------------------------------------------
+# Supabase POST
+# -------------------------------------------------------
+def sb_post(table, payload, chat_id=None):
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    logger.info(f"yaha_bot:Trying Supabase POST to: {url}")
+    logger.info(f"yaha_bot:Payload: {json.dumps(payload)}")
+
     try:
-        url = f"{SUPABASE_URL}/rest/v1/{path.lstrip('/')}"
-        logger.info(f"INFO:yaha_bot:Trying Supabase POST to: {url}")
-        logger.info(f"INFO:yaha_bot:Payload: {json.dumps(payload)}")
         r = requests.post(url, headers=sb_headers(), json=payload, timeout=15)
         if r.status_code not in (200, 201):
-            logger.error(f"ERROR:yaha_bot:Supabase POST error {r.status_code}: {r.text}")
+            logger.error(f"yaha_bot:Supabase POST error {r.status_code}: {r.text}")
+            run_yaha_diagnostic(f"Supabase POST error {r.status_code}: {r.text}", chat_id)
             return False
-        logger.info(f"INFO:yaha_bot:Supabase response: {r.text}")
+        logger.info(f"yaha_bot:Supabase response: {r.text}")
         return True
     except Exception as e:
-        logger.error(f"ERROR:yaha_bot:Supabase POST exception: {e}")
+        logger.error(f"Supabase POST exception: {e}")
+        run_yaha_diagnostic(str(e), chat_id)
         return False
 
-# --------------------------------------------------------------------
-# OCR + VOICE
-# --------------------------------------------------------------------
+# -------------------------------------------------------
+# OCR + Voice
+# -------------------------------------------------------
 def extract_text_from_image(file_url):
-    """OCR using GPT-4o-mini"""
     try:
         img = requests.get(file_url, timeout=20).content
         b64 = base64.b64encode(img).decode("ascii")
@@ -143,15 +130,13 @@ def extract_text_from_image(file_url):
         if openai_client:
             res = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, max_tokens=1500)
             return res.choices[0].message.content.strip()
-        else:
-            res = openai.ChatCompletion.create(model="gpt-4o-mini", messages=msgs, max_tokens=1500)
-            return res.choices[0].message["content"].strip()
+        res = openai.ChatCompletion.create(model="gpt-4o-mini", messages=msgs, max_tokens=1500)
+        return res.choices[0].message["content"].strip()
     except Exception as e:
         logger.error("OCR error: %s", e)
         return f"[OCR error] {e}"
 
 def transcribe_voice(file_url):
-    """Speech-to-text using pydub + Google recognizer"""
     try:
         data = requests.get(file_url, timeout=30).content
         ogg, wav = "/tmp/v.ogg", "/tmp/v.wav"
@@ -164,22 +149,21 @@ def transcribe_voice(file_url):
         logger.error("Voice transcription failed: %s", e)
         return f"[Voice error] {e}"
 
-# --------------------------------------------------------------------
-# OPENAI JSON EXTRACTOR
-# --------------------------------------------------------------------
+# -------------------------------------------------------
+# AI JSON extractor
+# -------------------------------------------------------
 def call_openai_for_json(user_text):
     schema_str = json.dumps(SCHEMA, indent=2)
     sys_prompt = (
         "You are a structured data extractor for a health tracking assistant.\n"
         "Recognize and return JSON only for these containers: sleep, food, exercise.\n"
-        f"Schema:\n{schema_str}\n"
+        f"Use this schema:\n{schema_str}\n"
         "Return JSON list only. Example:\n"
         "[{'container':'sleep','fields':{'sleep_score':88.3},'notes':'summary'}]"
     )
-    msgs = [
-        {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": user_text}
-    ]
+
+    msgs = [{"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_text}]
 
     try:
         if openai_client:
@@ -190,12 +174,11 @@ def call_openai_for_json(user_text):
             text = res.choices[0].message["content"].strip()
         parsed = json.loads(text)
     except Exception as e:
-        logger.warning(f"AI parse failed: {e}")
+        logger.warning("AI parse failed: %s", e)
         return str(e), None
 
     if isinstance(parsed, dict):
         parsed = [parsed]
-
     cleaned = []
     for obj in parsed:
         c = obj.get("container")
@@ -211,15 +194,14 @@ def call_openai_for_json(user_text):
             cleaned.append({"container": c, "fields": fields, "notes": obj.get("notes", "")})
     return json.dumps(cleaned), cleaned
 
-# --------------------------------------------------------------------
-# DATA ROUTING
-# --------------------------------------------------------------------
+# -------------------------------------------------------
+# Data routing
+# -------------------------------------------------------
 def map_payload(container, fields, chat_id):
-    # Bind chat_id deterministically so all of one user's inserts share same ID
-    user_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"yaha_{chat_id}"))
+    uid = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(chat_id)))
     date_val = datetime.now().strftime("%Y-%m-%d")
     base = {
-        "user_id": user_uuid,
+        "user_id": uid,
         "date": date_val,
         "created_at": now_iso(),
         "recorded_at": now_iso()
@@ -230,7 +212,6 @@ def map_payload(container, fields, chat_id):
 def route_to_container(parsed_json, chat_id):
     if not parsed_json:
         return [(False, "no_data")]
-
     results = []
     for obj in parsed_json:
         c = obj.get("container")
@@ -240,26 +221,22 @@ def route_to_container(parsed_json, chat_id):
         if not sanitized:
             results.append((False, f"{c}:empty_payload"))
             continue
-        ok = sb_post(f"{table}", sanitized)
+        ok = sb_post(table, sanitized, chat_id)
         results.append((ok, f"{c}:ok" if ok else f"{c}:insert_failed"))
     return results
 
-# --------------------------------------------------------------------
-# TELEGRAM
-# --------------------------------------------------------------------
+# -------------------------------------------------------
+# Telegram
+# -------------------------------------------------------
 def send_telegram_message(chat_id, text):
     try:
-        requests.post(
-            f"{TELEGRAM_API_URL}/sendMessage",
-            json={"chat_id": chat_id, "text": text},
-            timeout=10
-        )
+        requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=10)
     except Exception as e:
         logger.error("Telegram send error: %s", e)
 
-# --------------------------------------------------------------------
-# FLASK WEBHOOK
-# --------------------------------------------------------------------
+# -------------------------------------------------------
+# Webhook
+# -------------------------------------------------------
 @app.route("/")
 def index():
     return jsonify({"status": "ok"})
@@ -295,11 +272,12 @@ def webhook():
         send_telegram_message(chat_id, summary)
         return jsonify({"ok": True})
     except Exception as e:
-        logger.error(f"Webhook exception: {e}")
+        logger.error("Webhook exception: %s", e)
+        run_yaha_diagnostic(str(e))
         return jsonify({"ok": False, "error": str(e)}), 500
 
-# --------------------------------------------------------------------
-# RUN APP
-# --------------------------------------------------------------------
+# -------------------------------------------------------
+# Run
+# -------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
