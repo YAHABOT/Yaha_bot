@@ -5,7 +5,6 @@ from flask import Flask, request, jsonify
 import openai
 from pydub import AudioSegment
 import speech_recognition as sr
-import threading
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("yaha_bot")
@@ -23,7 +22,7 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 # GPT HANDSHAKE
 # -------------------------------------------------------
 def gpt_handshake_test():
-    time.sleep(8)  # wait longer for Render startup
+    time.sleep(5)
     logger.info("🧠 Starting GPT handshake test...")
     try:
         from openai import OpenAI
@@ -94,7 +93,7 @@ def sb_post(table, payload):
         return False
 
 # -------------------------------------------------------
-# TELEGRAM + OPENAI OCR LOGIC (same as before)
+# TELEGRAM + OCR
 # -------------------------------------------------------
 def extract_text_from_image(file_url):
     try:
@@ -196,5 +195,7 @@ def webhook():
 # RUN
 # -------------------------------------------------------
 if __name__ == "__main__":
-    threading.Thread(target=gpt_handshake_test, daemon=True).start()
+    logger.info("🚀 Server starting...")
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    # when Flask starts, run handshake inline
+    gpt_handshake_test()
