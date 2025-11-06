@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, json, logging, requests, base64, re, uuid, functools
+import os, json, logging, requests, base64, re, uuid, functools, time
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 import openai
@@ -22,9 +22,10 @@ app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # -------------------------------------------------------
-# GPT HANDSHAKE TEST (runs on startup)
+# GPT HANDSHAKE TEST (delayed startup)
 # -------------------------------------------------------
 def gpt_handshake_test():
+    time.sleep(5)
     try:
         from openai import OpenAI
         client = OpenAI(api_key=OPENAI_API_KEY)
@@ -33,7 +34,7 @@ def gpt_handshake_test():
                 prompt={"id": GPT_PROMPT_ID, "version": "1"},
                 input="Ping test from Render — confirm connection alive."
             )
-            logger.info("✅ GPT handshake: %s", resp.output_text)
+            logger.info("✅ GPT handshake successful: %s", resp.output_text)
         else:
             logger.warning("⚠️ GPT_PROMPT_ID not set.")
     except Exception as e:
@@ -255,5 +256,6 @@ def webhook():
 # RUN APP
 # -------------------------------------------------------
 if __name__ == "__main__":
-    gpt_handshake_test()
+    import threading
+    threading.Thread(target=gpt_handshake_test, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
