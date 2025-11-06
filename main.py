@@ -5,13 +5,11 @@ from flask import Flask, request, jsonify
 import openai
 from pydub import AudioSegment
 import speech_recognition as sr
+import threading
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("yaha_bot")
 
-# -------------------------------------------------------
-# ENV VARS
-# -------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL       = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -22,23 +20,27 @@ app = Flask(__name__)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # -------------------------------------------------------
-# GPT HANDSHAKE TEST (delayed startup)
+# GPT HANDSHAKE
 # -------------------------------------------------------
 def gpt_handshake_test():
-    time.sleep(5)
+    time.sleep(8)  # wait longer for Render startup
+    logger.info("🧠 Starting GPT handshake test...")
     try:
         from openai import OpenAI
         client = OpenAI(api_key=OPENAI_API_KEY)
-        if GPT_PROMPT_ID:
-            resp = client.responses.create(
-                prompt={"id": GPT_PROMPT_ID, "version": "1"},
-                input="Ping test from Render — confirm connection alive."
-            )
-            logger.info("✅ GPT handshake successful: %s", resp.output_text)
-        else:
-            logger.warning("⚠️ GPT_PROMPT_ID not set.")
+        if not GPT_PROMPT_ID:
+            logger.warning("⚠️ GPT_PROMPT_ID missing.")
+            return
+
+        logger.info("Sending ping to GPT prompt ID: %s", GPT_PROMPT_ID)
+        resp = client.responses.create(
+            prompt={"id": GPT_PROMPT_ID, "version": "1"},
+            input="Ping from Render — confirm connection alive."
+        )
+        output_text = getattr(resp, "output_text", None) or str(resp)
+        logger.info("✅ GPT handshake success — Response:\n%s", output_text)
     except Exception as e:
-        logger.error("❌ GPT handshake failed: %s", e)
+        logger.error("❌ GPT handshake failed: %s", e, exc_info=True)
 
 # -------------------------------------------------------
 # UTILITIES
@@ -63,16 +65,12 @@ def clean_number(val):
     except Exception:
         return None
 
-# -------------------------------------------------------
-# SCHEMA
-# -------------------------------------------------------
 SCHEMA = {
     "sleep": {"sleep_score": "float", "energy_score": "float", "duration_hr": "float", "resting_hr": "float", "notes": "string"},
     "food": {"meal_name": "string", "calories": "float", "protein_g": "float", "carbs_g": "float", "fat_g": "float", "fiber_g": "float", "notes": "string"},
     "exercise": {"workout_name": "string", "distance_km": "float", "duration_min": "float", "calories_burned": "float", "training_intensity": "float", "avg_hr": "float", "notes": "string"}
 }
 
-@functools.lru_cache(maxsize=64)
 def fetch_table_columns(table):
     return list(SCHEMA.get(table, {}).keys())
 
@@ -83,20 +81,20 @@ def sanitize_payload(payload, table):
 def sb_post(table, payload):
     try:
         url = f"{SUPABASE_URL}/rest/v1/{table}"
-        logger.info("INFO:yaha_bot:Trying Supabase POST to %s", url)
-        logger.info("INFO:yaha_bot:Payload: %s", json.dumps(payload))
+        logger.info("INFO:yaha_bot:POST → %s", url)
+        logger.info("Payload: %s", json.dumps(payload))
         r = requests.post(url, headers=sb_headers(), json=payload, timeout=15)
         if r.status_code not in (200, 201):
-            logger.error("ERROR:yaha_bot:Supabase POST error %s: %s", r.status_code, r.text)
+            logger.error("ERROR: Supabase POST %s — %s", r.status_code, r.text)
             return False
-        logger.info("INFO:yaha_bot:Supabase response: %s", r.text)
+        logger.info("Supabase response: %s", r.text)
         return True
     except Exception as e:
-        logger.error("ERROR:yaha_bot:Supabase POST exception: %s", e)
+        logger.error("Supabase POST exception: %s", e)
         return False
 
 # -------------------------------------------------------
-# OCR / VOICE
+# TELEGRAM + OPENAI OCR LOGIC (same as before)
 # -------------------------------------------------------
 def extract_text_from_image(file_url):
     try:
@@ -116,22 +114,6 @@ def extract_text_from_image(file_url):
         logger.error("OCR error: %s", e)
         return f"[OCR error] {e}"
 
-def transcribe_voice(file_url):
-    try:
-        data = requests.get(file_url, timeout=30).content
-        ogg, wav = "/tmp/v.ogg", "/tmp/v.wav"
-        with open(ogg, "wb") as f: f.write(data)
-        AudioSegment.from_ogg(ogg).export(wav, format="wav")
-        r = sr.Recognizer()
-        with sr.AudioFile(wav) as src:
-            return r.recognize_google(r.record(src))
-    except Exception as e:
-        logger.error("Voice transcription failed: %s", e)
-        return f"[Voice error] {e}"
-
-# -------------------------------------------------------
-# AI JSON EXTRACTOR
-# -------------------------------------------------------
 def call_openai_for_json(user_text):
     schema_str = json.dumps(SCHEMA, indent=2)
     sys_prompt = (
@@ -172,47 +154,7 @@ def call_openai_for_json(user_text):
     return json.dumps(cleaned), cleaned
 
 # -------------------------------------------------------
-# ROUTING
-# -------------------------------------------------------
-def map_payload(container, fields, chat_id):
-    uid = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(chat_id)))
-    date_val = datetime.now().strftime("%Y-%m-%d")
-    base = {
-        "user_id": uid,
-        "date": date_val,
-        "created_at": now_iso(),
-        "recorded_at": now_iso()
-    }
-    base.update(fields)
-    return container, base
-
-def route_to_container(parsed_json, chat_id):
-    if not parsed_json:
-        return [(False, "no_data")]
-    results = []
-    for obj in parsed_json:
-        c = obj.get("container")
-        fields = obj.get("fields", {})
-        table, payload = map_payload(c, fields, chat_id)
-        sanitized = sanitize_payload(payload, table)
-        if not sanitized:
-            results.append((False, f"{c}:empty_payload"))
-            continue
-        ok = sb_post(table, sanitized)
-        results.append((ok, f"{c}:ok" if ok else f"{c}:insert_failed"))
-    return results
-
-# -------------------------------------------------------
-# TELEGRAM
-# -------------------------------------------------------
-def send_telegram_message(chat_id, text):
-    try:
-        requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=10)
-    except Exception as e:
-        logger.error("Telegram send error: %s", e)
-
-# -------------------------------------------------------
-# WEBHOOK
+# MAIN ROUTES
 # -------------------------------------------------------
 @app.route("/")
 def index():
@@ -224,38 +166,35 @@ def webhook():
         data = request.get_json(force=True, silent=True)
         msg = data.get("message") or data.get("edited_message") or {}
         chat_id = msg.get("chat", {}).get("id")
-        text = ""
-
-        if "photo" in msg:
-            fid = msg["photo"][-1]["file_id"]
-            fpath = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
-            text = extract_text_from_image(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}") if fpath else "[OCR error]"
-        elif "voice" in msg:
-            fid = msg["voice"]["file_id"]
-            fpath = requests.get(f"{TELEGRAM_API_URL}/getFile?file_id={fid}", timeout=10).json().get("result", {}).get("file_path")
-            text = transcribe_voice(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fpath}") if fpath else "[Voice error]"
-        else:
-            text = msg.get("text", "")
+        text = msg.get("text", "")
 
         ai_text, parsed_json = call_openai_for_json(text)
-        results = route_to_container(parsed_json, chat_id)
+        results = []
+        if parsed_json:
+            for obj in parsed_json:
+                c = obj["container"]
+                payload = obj["fields"]
+                payload["date"] = datetime.now().strftime("%Y-%m-%d")
+                payload["created_at"] = now_iso()
+                payload["recorded_at"] = now_iso()
+                payload["user_id"] = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(chat_id)))
+                ok = sb_post(c, payload)
+                results.append((ok, f"{c}:{'ok' if ok else 'failed'}"))
 
         summary = f"OCR/Transcript preview:\n{text[:400]}\n\nProcessed.\n"
         if not parsed_json:
             summary += "⚠️ Parsing failed — no valid data found.\n"
         for ok, label in results:
             summary += f"✅ {label}\n" if ok else f"⚠️ {label}\n"
-
-        send_telegram_message(chat_id, summary)
+        requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={"chat_id": chat_id, "text": summary})
         return jsonify({"ok": True})
     except Exception as e:
-        logger.error("Webhook exception: %s", e)
+        logger.error("Webhook error: %s", e, exc_info=True)
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # -------------------------------------------------------
-# RUN APP
+# RUN
 # -------------------------------------------------------
 if __name__ == "__main__":
-    import threading
     threading.Thread(target=gpt_handshake_test, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
