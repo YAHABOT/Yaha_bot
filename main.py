@@ -6,13 +6,15 @@ from flask import Flask, request, jsonify
 from datetime import datetime
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+# === ENV VARS ===
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_API_KEY = os.environ.get("SUPABASE_ANON_KEY")
 GPT_PROMPT_ID = os.environ.get("GPT_PROMPT_ID")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
+# === SUPABASE INSERT ===
 def insert_record(table_name, payload):
     url = f"{SUPABASE_URL}/{table_name}"
     headers = {
@@ -25,15 +27,22 @@ def insert_record(table_name, payload):
     logging.info(f"🧩 Supabase POST {response.status_code}: {response.text}")
     return response
 
+# === TELEGRAM MESSAGE SEND ===
 def send_telegram_message(chat_id, text):
     if not TELEGRAM_BOT_TOKEN:
-        logging.warning("⚠️ No TELEGRAM_BOT_TOKEN in environment — cannot send message.")
+        logging.warning("⚠️ TELEGRAM_BOT_TOKEN missing — cannot send message.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
-    r = requests.post(url, json=payload)
-    logging.info(f"📩 Telegram sendMessage response: {r.status_code} {r.text}")
+    logging.info(f"🌍 Attempting Telegram POST to {url}")
+    logging.info(f"📦 Payload: {payload}")
+    try:
+        r = requests.post(url, json=payload)
+        logging.info(f"📩 Telegram response: {r.status_code} {r.text}")
+    except Exception as e:
+        logging.error(f"💥 Telegram sendMessage failed: {e}")
 
+# === WEBHOOK HANDLER ===
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(force=True)
@@ -58,7 +67,11 @@ def webhook():
         "date": datetime.utcnow().date().isoformat()
     }
 
+    # Insert to Supabase
     response = insert_record("food", payload)
+
+    # Debug before sending Telegram
+    logging.info("🚀 Preparing to send Telegram confirmation message...")
 
     if response.status_code in [200, 201]:
         send_telegram_message(chat_id, "✅ Food entry logged successfully.")
@@ -67,10 +80,12 @@ def webhook():
 
     return jsonify({"status": "ok"}), 200
 
+# === ROOT ENDPOINT ===
 @app.route("/", methods=["GET"])
 def home():
     return "YAHA bot is live and running!", 200
 
+# === RUN APP ===
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
