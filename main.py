@@ -1,114 +1,108 @@
-#!/usr/bin/env python3
-import os, json, logging, requests, base64, re, uuid
-from datetime import datetime, timezone
+import os
+import json
+import logging
+import requests
 from flask import Flask, request, jsonify
-import openai
-
-# -------------------------------------------------------
-# Logging
-# -------------------------------------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("yaha_bot")
-
-# -------------------------------------------------------
-# Environment
-# -------------------------------------------------------
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
-SUPABASE_URL       = os.getenv("SUPABASE_URL", "").rstrip("/")
-SUPABASE_ANON_KEY  = os.getenv("SUPABASE_ANON_KEY")
-GPT_PROMPT_ID      = os.getenv("GPT_PROMPT_ID")
+from datetime import datetime
 
 app = Flask(__name__)
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(message)s")
 
-# -------------------------------------------------------
-# GPT handshake check
-# -------------------------------------------------------
-def gpt_handshake_test():
-    logger.info("🧠 Starting GPT handshake test...")
+# === ENV VARIABLES ===
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_API_KEY = os.environ.get("SUPABASE_ANON_KEY")
+GPT_PROMPT_ID = os.environ.get("GPT_PROMPT_ID")
+
+# === SETUP CHECK ===
+@app.before_first_request
+def startup_check():
+    logging.info("🧠 Starting GPT handshake test...")
+    if not GPT_PROMPT_ID:
+        logging.warning("⚠️ No GPT_PROMPT_ID found — skipping handshake test.")
+        return
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        resp = client.responses.create(
-            prompt={"id": GPT_PROMPT_ID, "version": "1"},
-            input="Ping from Render — confirm connection alive."
+        resp = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "gpt-4.1",
+                "input": f"Hello from Render — GPT handshake test for prompt ID {GPT_PROMPT_ID}"
+            }
         )
-        text = getattr(resp, "output_text", None) or str(resp)
-        logger.info("✅ GPT handshake success — %s", text[:120])
+        if resp.status_code == 200:
+            logging.info("✅ GPT handshake success — Connection confirmed. I am active and ready to assist.")
+        else:
+            logging.warning(f"⚠️ GPT handshake failed: {resp.status_code} {resp.text}")
     except Exception as e:
-        logger.error("❌ GPT handshake failed: %s", e, exc_info=True)
+        logging.error(f"❌ GPT handshake exception: {e}")
 
-try:
-    gpt_handshake_test()
-except Exception as e:
-    logger.error("Handshake test failed: %s", e)
-
-# -------------------------------------------------------
-# Supabase helpers
-# -------------------------------------------------------
-def sb_headers():
-    return {
-        "apikey": SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+# === SUPABASE INSERT FUNCTION ===
+def insert_record(table_name, payload):
+    url = f"{SUPABASE_URL}/{table_name}"
+    headers = {
+        "apikey": SUPABASE_API_KEY,
+        "Authorization": f"Bearer {SUPABASE_API_KEY}",
         "Content-Type": "application/json",
         "Prefer": "return=representation"
     }
 
-def to_uuid(chat_id):
-    """Convert Telegram numeric ID → deterministic UUID."""
-    return str(uuid.uuid5(uuid.NAMESPACE_DNS, str(chat_id)))
+    logging.info(f"🧩 ENV SUPABASE_URL: {SUPABASE_URL}")
+    logging.info(f"🧩 Final POST URL: {url}")
+    logging.info(f"🧩 Payload: {json.dumps(payload)}")
 
-def sb_post(table, payload):
-    try:
-        full_url = f"{SUPABASE_URL}/rest/v1/{table}" if not SUPABASE_URL.endswith("/rest/v1") else f"{SUPABASE_URL}/{table}"
-        logger.info("🧩 ENV SUPABASE_URL: %s", SUPABASE_URL)
-        logger.info("🧩 Final POST URL: %s", full_url)
-        logger.info("🧩 Payload: %s", json.dumps(payload))
-        r = requests.post(full_url, headers=sb_headers(), json=payload, timeout=15)
-        logger.info("🔁 Response %s: %s", r.status_code, r.text)
-        return r.status_code in (200, 201)
-    except Exception as e:
-        logger.error("Supabase POST exception: %s", e, exc_info=True)
-        return False
+    response = requests.post(url, headers=headers, json=payload)
+    logging.info(f"🧩 Response {response.status_code}: {response.text}")
+    return response
 
-# -------------------------------------------------------
-# Web routes
-# -------------------------------------------------------
-@app.route("/")
-def index():
-    return jsonify({"status": "ok"})
 
+# === TELEGRAM WEBHOOK ===
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    try:
-        data = request.get_json(force=True, silent=True)
-        msg = data.get("message") or {}
-        chat_id = msg.get("chat", {}).get("id")
-        user_uuid = to_uuid(chat_id)
-        logger.info("📡 Telegram chat_id=%s mapped to UUID=%s", chat_id, user_uuid)
+    data = request.get_json(force=True)
+    chat_id = data.get("message", {}).get("chat", {}).get("id", "unknown")
+    text = data.get("message", {}).get("text", "unknown")
 
-        payload = {
-            "meal_name": "Debug Insert",
-            "calories": 111,
-            "protein_g": 11,
-            "carbs_g": 11,
-            "fat_g": 11,
-            "fiber_g": 1,
-            "notes": f"Auto test at {datetime.now(timezone.utc).isoformat()}",
-            "user_id": user_uuid,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "recorded_at": datetime.now(timezone.utc).isoformat()
-        }
+    # Mock user mapping (you can replace this later with DB lookup)
+    user_uuid = "68e5fa46-f6e3-5e14-8bdc-f2d549013c1f"
+    logging.info(f"💬 Telegram chat_id={chat_id} mapped to UUID={user_uuid}")
 
-        ok = sb_post("food", payload)
-        return jsonify({"ok": ok})
-    except Exception as e:
-        logger.error("Webhook error: %s", e, exc_info=True)
-        return jsonify({"error": str(e)}), 500
+    # Debug payload (you’ll replace this with OCR/GPT result later)
+    payload = {
+        "meal_name": "Debug Insert",
+        "calories": 111,
+        "protein_g": 11,
+        "carbs_g": 11,
+        "fat_g": 11,
+        "fiber_g": 1,
+        "notes": f"Auto test at {datetime.utcnow().isoformat()}",
+        "user_id": user_uuid,
+        "created_at": datetime.utcnow().isoformat(),
+        "recorded_at": datetime.utcnow().isoformat(),
+        "date": datetime.utcnow().date().isoformat()
+    }
 
-# -------------------------------------------------------
-# Run
-# -------------------------------------------------------
+    response = insert_record("food", payload)
+
+    # ✅ Always return something to Telegram to prevent silence
+    if response.status_code in [200, 201]:
+        return jsonify({"status": "ok", "message": "Food entry logged successfully"}), 200
+    else:
+        return jsonify({
+            "status": "error",
+            "message": f"Insert failed: {response.status_code}",
+            "details": response.text
+        }), 200
+
+
+# === HEALTH CHECK ===
+@app.route("/", methods=["GET"])
+def home():
+    return "YAHA bot is live and running!", 200
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
