@@ -4,7 +4,7 @@ from openai import OpenAI
 import requests
 import json
 from datetime import datetime
-from zoneinfo import ZoneInfo  # built-in replacement for pytz
+import pytz
 
 app = Flask(__name__)
 
@@ -19,26 +19,26 @@ GPT_PROMPT_ID = os.environ.get("GPT_PROMPT_ID")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-PORTUGAL_TZ = ZoneInfo("Europe/Lisbon")
-
-
 # -------------------------------
-# Telegram Helpers
+# Telegram helpers
 # -------------------------------
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
+    payload = {
+        "chat_id": chat_id,
+        "text": text
+    }
     requests.post(url, json=payload)
 
 
 # -------------------------------
-# GPT PARSER v3 (container detection + JSON)
+# GPT PARSER
 # -------------------------------
-def call_gpt_parser(prompt):
+def call_gpt_parser(prompt: str):
     try:
         response = openai_client.responses.parse(
             model="gpt-4.1-mini",
-            input=prompt,
+            input=prompt
         )
         return response.output
 
@@ -48,84 +48,118 @@ def call_gpt_parser(prompt):
 
 
 # -------------------------------
-# Utility: get today's date in Portugal
+# Date helper
 # -------------------------------
 def get_local_date():
-    return datetime.now(PORTUGAL_TZ).strftime("%Y-%m-%d")
+    tz = pytz.timezone("Europe/Lisbon")
+    return datetime.now(tz).strftime("%Y-%m-%d")
 
 
 # -------------------------------
-# Utility: Supabase POST Wrapper
+# Supabase insert helper
 # -------------------------------
-def supabase_insert(table, row):
+def supabase_insert(table, payload):
     url = f"{SUPABASE_URL}/rest/v1/{table}"
+
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
-        "Prefer": "return=representation",
+        "Prefer": "return=representation"
     }
 
-    r = requests.post(url, headers=headers, json=row)
+    res = requests.post(url, headers=headers, json=payload)
 
-    if r.status_code >= 300:
-        print(f"SUPABASE ERROR ({table}):", r.text)
-    else:
-        print(f"SUPABASE OK ({table}):", r.text)
+    try:
+        body = res.json()
+    except:
+        body = res.text
 
-    return r.status_code, r.text
+    print("Supabase response status=", res.status_code, "body=", body)
+    return res.status_code, body
 
 
 # -------------------------------
-# /webhook — MAIN INGESTION ENTRY
+# Webhook endpoint
 # -------------------------------
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
     try:
         update = request.get_json()
-        message = update.get("message", {})
-        chat_id = message.get("chat", {}).get("id")
-        user_text = message.get("text", "")
+
+        # --- FIX: sometimes Telegram sends a LIST of updates ---
+        if isinstance(update, list):
+            update = update[0]
+
+        if not isinstance(update, dict):
+            print("WEBHOOK ERROR: update not a dict:", update)
+            return "ok", 200
+
+        message = update.get("message") or update.get("edited_message")
+
+        if not isinstance(message, dict):
+            print("WEBHOOK ERROR: message missing or not dict:", message)
+            return "ok", 200
+
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
 
         if not chat_id:
-            return "no chat id", 200
+            print("WEBHOOK ERROR: no chat_id")
+            return "ok", 200
 
+        user_text = message.get("text", "").strip()
+
+        if not user_text:
+            send_telegram_message(chat_id, "⚠️ Empty message received.")
+            return "ok", 200
+
+        # Feed user text to GPT parser
         parsed = call_gpt_parser(user_text)
 
         if parsed is None:
             send_telegram_message(chat_id, "⚠️ Sorry, I couldn’t process that.")
             return "ok", 200
 
-        # String → just echo it
+        # ------------------------------------------
+        # If GPT returns plain text → send back
+        # ------------------------------------------
         if isinstance(parsed, str):
             send_telegram_message(chat_id, parsed)
             return "ok", 200
 
-        # -------------------------------
-        # JSON_OUTPUT → container logic
-        # -------------------------------
-        container = parsed.get("container")
+        # ------------------------------------------
+        # If GPT returns structured JSON
+        # ------------------------------------------
+        if isinstance(parsed, dict):
+            container = parsed.get("container")
+            data = parsed.get("data", {})
+            msg = parsed.get("message_to_user", "Logged.")
 
-        if not container:
-            send_telegram_message(chat_id, "I didn’t understand what to log. Food, sleep, or exercise?")
+            # Add chat_id and date if missing
+            data["chat_id"] = str(chat_id)
+            if not data.get("date"):
+                data["date"] = get_local_date()
+
+            # Insert into correct table
+            if container in ["food", "sleep", "exercise"]:
+                status, body = supabase_insert(container, data)
+
+                if status >= 200 and status < 300:
+                    send_telegram_message(chat_id, msg)
+                else:
+                    send_telegram_message(
+                        chat_id,
+                        f"{msg}\nHowever, saving to {container} failed:\n{body}"
+                    )
+                return "ok", 200
+
+            # Unknown container
+            send_telegram_message(chat_id, msg)
             return "ok", 200
 
-        # Force user_id = chat_id (temporary rule)
-        parsed["user_id"] = str(chat_id)
-        parsed["chat_id"] = str(chat_id)
-
-        # Auto-fill date if missing
-        if "date" not in parsed or not parsed["date"]:
-            parsed["date"] = get_local_date()
-
-        # Insert into Supabase
-        status, resp = supabase_insert(container, parsed)
-
-        if status < 300:
-            send_telegram_message(chat_id, f"Logged your {container} entry 👍")
-        else:
-            send_telegram_message(chat_id, f"⚠️ Error logging {container}. Check logs.")
-
+        # Fallback
+        send_telegram_message(chat_id, str(parsed))
         return "ok", 200
 
     except Exception as e:
