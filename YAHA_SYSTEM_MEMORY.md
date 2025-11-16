@@ -603,6 +603,25 @@ Status: ❌ Failed deploy. Needs follow-up build that adds pytz to requirements 
 
 - **Status:** ❌ **Failed build** — needs new patch to reconnect GPT parser + enforce dict output shape.
 
+[2025-11-16] — Build 005 — Supabase path failure after schema refactor
+
+- **Summary:** All three containers (food, sleep, exercise) failed to insert after reconnecting the GPT parser, producing 404 "Invalid path specified" errors.
+- **Problem:**  
+  Although parser JSON was correct again, the Supabase POST requests went to an incorrect URL path.  
+  Render logs show:
+  `PGRST125 — Invalid path specified in request URL`.
+  Meaning: request hit `/rest/v1/<something_wrong>` instead of `/rest/v1/food` `/sleep` `/exercise`.
+- **What changed:**  
+  - During the previous build cleanup (removing timezone prototype + fixing parser), the block that builds `table_url` was overwritten.  
+  - As a result, the final POST URL became malformed.  
+  - All inserts returned 404 and the bot showed “I tried to log your X but Supabase returned an error.”
+- **How it was tested:**  
+  - User sent 3 logs (food → sleep → exercise).  
+  - Bot correctly classified and parsed them (good).  
+  - Bot attempted Supabase inserts (bad).  
+  - Render logs confirmed 404 for all 3 (bad).  
+  - Supabase dashboard showed no new rows (bad).
+- **Status:** ❌ Failed build — needs corrected REST path assembly and table name mapping.
 
 
 ---
