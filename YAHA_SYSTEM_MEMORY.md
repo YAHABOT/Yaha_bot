@@ -580,7 +580,29 @@ Cause: pytz not included in requirements.txt.
 
 Status: ❌ Failed deploy. Needs follow-up build that adds pytz to requirements and re-deploys.
 
-(Future builds go here. The assistant will always propose the next block when changes are made.)
+### [2025-11-16] — Build 004 — Parser regression, GPT prompt disconnect
+
+- **Summary:** Fix attempt for timezone/user_id regression introduced a new failure: GPT parsing no longer returns structured JSON and bot falls back to default Responses API text.
+  
+- **Problem:**  
+  After removing the timezone prototype and deploying the patch, the webhook started failing with:  
+  `WEBHOOK ERROR: 'list' object has no attribute 'get'`.  
+  Telegram replies showed `ParsedResponseOutputMessage` instead of structured container JSON.  
+  Supabase inserts stopped entirely.
+
+- **What changed:**  
+  - Removed timezone code but accidentally disconnected the parser from the configured `GPT_PROMPT_ID`.  
+  - openai.responses.parse was not being called → fallback to responses.create triggered.  
+  - The fallback returns "assistant-style" text instead of structured JSON.  
+  - Error-handling path expected a dict, but got a list → crash.
+
+- **Testing:**  
+  - Sent breakfast log: bot returned text summary, not JSON.  
+  - Supabase tables received no new rows.  
+  - Render logs confirmed `'list' object has no attribute 'get'`.
+
+- **Status:** ❌ **Failed build** — needs new patch to reconnect GPT parser + enforce dict output shape.
+
 
 
 ---
