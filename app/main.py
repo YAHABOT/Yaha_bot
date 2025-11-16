@@ -1,6 +1,5 @@
 import os
 import json
-import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -8,11 +7,9 @@ import requests
 from flask import Flask, request
 from openai import OpenAI
 
-# --------------------------------------------------
-# Basic setup
-# --------------------------------------------------
-
-logging.basicConfig(level=logging.INFO)
+# -------------------------------
+# App & config
+# -------------------------------
 
 app = Flask(__name__)
 
@@ -20,335 +17,304 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY")
-GPT_PROMPT_ID = os.environ.get("GPT_PROMPT_ID")  # optional; falls back to gpt-4.1-mini
+
+# Single-owner mapping (MVP)
+OWNER_CHAT_ID = os.environ.get("YAHA_OWNER_CHAT_ID")      # e.g. "2052083060"
+OWNER_USER_ID = os.environ.get("YAHA_OWNER_USER_ID")      # e.g. your UUID from Supabase users table
+
+# Timezone for "today"
+LOCAL_TZ = ZoneInfo("Europe/Lisbon")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --------------------------------------------------
+
+# -------------------------------
 # Helpers
-# --------------------------------------------------
+# -------------------------------
 
-def get_local_date_iso():
-    """
-    Return today's date in Europe/Lisbon as YYYY-MM-DD.
-    No external deps (uses stdlib zoneinfo).
-    """
-    tz = ZoneInfo("Europe/Lisbon")
-    return datetime.now(tz).date().isoformat()
+def today_local_date_str() -> str:
+    """Return today's date as YYYY-MM-DD in Europe/Lisbon."""
+    return datetime.now(LOCAL_TZ).date().isoformat()
 
 
-def send_telegram_message(chat_id: int | str, text: str):
-    """
-    Send a plain-text message back to the Telegram user.
-    """
-    if not TELEGRAM_TOKEN:
-        logging.error("TELEGRAM_TOKEN missing - cannot send Telegram messages.")
-        return
+def now_utc_iso() -> str:
+    """Return current UTC timestamp in ISO format."""
+    return datetime.utcnow().isoformat() + "Z"
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-    }
+
+def send_telegram_message(chat_id, text):
+    """Send a plain text message to Telegram."""
     try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+        }
         resp = requests.post(url, json=payload, timeout=10)
-        logging.info("Telegram sendMessage status=%s body=%s", resp.status_code, resp.text)
+        print(f"[TELEGRAM] status={resp.status_code} body={resp.text}")
     except Exception as e:
-        logging.error("Telegram sendMessage error: %s", e)
-
-
-def call_gpt_parser(user_text: str):
-    """
-    Call OpenAI Responses API to classify the message and extract structured data.
-
-    Expected JSON shape from the model:
-
-    {
-      "container": "food" | "sleep" | "exercise" | "unknown",
-      "data": { ... },
-      "message_to_user": "short confirmation string"
-    }
-    """
-    if not OPENAI_API_KEY:
-        logging.error("OPENAI_API_KEY missing, cannot call GPT.")
-        return None
-
-    model_id = GPT_PROMPT_ID or "gpt-4.1-mini"
-
-    system_prompt = (
-        "You are YAHA's ingestion parser.\n"
-        "Your job is to read a single Telegram message and decide if it is about:\n"
-        "- food\n"
-        "- sleep\n"
-        "- exercise\n"
-        "Then you must output ONE JSON object only (no markdown, no extra text), with this shape:\n"
-        "{\n"
-        '  \"container\": \"food\" | \"sleep\" | \"exercise\" | \"unknown\",\n"
-        "  \"data\": { ... },\n"
-        "  \"message_to_user\": \"short natural-language confirmation\"\n"
-        "}\n"
-        "\n"
-        "For container = \"food\", the data object may include:\n"
-        "  \"date\" (YYYY-MM-DD or null),\n"
-        "  \"meal_name\",\n"
-        "  \"calories\",\n"
-        "  \"protein_g\",\n"
-        "  \"carbs_g\",\n"
-        "  \"fat_g\",\n"
-        "  \"fiber_g\",\n"
-        "  \"notes\".\n"
-        "\n"
-        "For container = \"sleep\", the data object may include:\n"
-        "  \"date\" (YYYY-MM-DD or null),\n"
-        "  \"sleep_score\",\n"
-        "  \"energy_score\",\n"
-        "  \"duration_hr\",\n"
-        "  \"resting_hr\",\n"
-        "  \"sleep_start\",\n"
-        "  \"sleep_end\",\n"
-        "  \"notes\".\n"
-        "\n"
-        "For container = \"exercise\", the data object may include:\n"
-        "  \"date\" (YYYY-MM-DD or null),\n"
-        "  \"workout_name\",\n"
-        "  \"distance_km\",\n"
-        "  \"duration_min\",\n"
-        "  \"calories_burned\",\n"
-        "  \"training_intensity\",\n"
-        "  \"avg_hr\",\n"
-        "  \"max_hr\",\n"
-        "  \"training_type\",\n"
-        "  \"perceived_intensity\",\n"
-        "  \"effort_description\",\n"
-        "  \"tags\",\n"
-        "  \"notes\".\n"
-        "\n"
-        "Rules:\n"
-        "- Use numbers as bare numbers (no units attached).\n"
-        "- If the user does not clearly give a date, set \"date\" to null.\n"
-        "- For any field you cannot safely infer, use null.\n"
-        "- If the message is not clearly food, sleep or exercise, set \"container\" to \"unknown\".\n"
-        "- Absolutely do NOT wrap the JSON in ``` or any other formatting.\n"
-    )
-
-    try:
-        logging.info("GPT PARSER INPUT: %s", user_text)
-
-        response = openai_client.responses.create(
-            model=model_id,
-            input=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text},
-            ],
-        )
-
-        # Extract plain text from Responses API
-        try:
-            raw_text = response.output[0].content[0].text
-        except Exception as e:
-            logging.error("Unexpected GPT response structure: %s", e)
-            logging.error("Full GPT response: %s", response)
-            return None
-
-        logging.info("GPT RAW OUTPUT: %s", raw_text)
-
-        # Try to parse JSON
-        try:
-            parsed = json.loads(raw_text)
-        except json.JSONDecodeError as e:
-            logging.error("Failed to json.loads GPT output: %s", e)
-            return None
-
-        # Sometimes models return a list like [ {..} ], handle that too.
-        if isinstance(parsed, list) and parsed:
-            parsed = parsed[0]
-
-        if not isinstance(parsed, dict):
-            logging.error("Parsed GPT output is not a dict: %s", type(parsed))
-            return None
-
-        return parsed
-
-    except Exception as e:
-        logging.error("GPT PARSER ERROR: %s", e)
-        return None
+        print(f"[TELEGRAM ERROR] {e}")
 
 
 def supabase_insert(table: str, row: dict):
-    """
-    Insert a single row into Supabase and return (ok, status_code, text).
-    """
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        logging.error("Supabase env vars missing.")
-        return False, 0, "Supabase URL or key missing"
-
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation",
-    }
-
+    """Insert one row into Supabase using REST API."""
     try:
-        logging.info("Supabase insert -> table=%s payload=%s", table, row)
+        url = f"{SUPABASE_URL}/rest/v1/{table}"
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        }
         resp = requests.post(url, headers=headers, json=row, timeout=10)
-        logging.info("Supabase response status=%s body=%s", resp.status_code, resp.text)
-        ok = 200 <= resp.status_code < 300
-        return ok, resp.status_code, resp.text
+        print(f"[SUPABASE {table}] status={resp.status_code} body={resp.text}")
+        return resp
     except Exception as e:
-        logging.error("Supabase insert error: %s", e)
-        return False, 0, str(e)
+        print(f"[SUPABASE ERROR] table={table} error={e}")
+        return None
 
 
-def build_payload(container: str, data: dict, chat_id: int | str):
-    """
-    Add common fields (user_id, chat_id, date) and filter allowed columns
-    for each table so we don't send unknown columns to Supabase.
-    """
-    if data is None:
-        data = {}
+# -------------------------------
+# GPT parser
+# -------------------------------
 
-    # For MVP: user_id == chat_id as string
-    user_id = str(chat_id)
+PARSER_SYSTEM_PROMPT = """
+You are the YAHA ingestion parser.
 
-    # Auto-fill date if missing or null
-    date_val = data.get("date")
-    if not date_val:
-        date_val = get_local_date_iso()
+Your job:
+1. Decide which container the user is logging into: "food", "sleep", "exercise", or "unknown".
+2. Extract structured fields into a JSON object that matches the container.
+3. Generate a short friendly reply for the Telegram user confirming what was logged.
 
-    base = {
-        "user_id": user_id,
-        "chat_id": str(chat_id),
-        "date": date_val,
-    }
+You MUST respond with VALID JSON ONLY, no extra text, no explanations.
 
-    if container == "food":
-        allowed = [
-            "user_id",
-            "chat_id",
-            "date",
-            "meal_name",
-            "calories",
-            "protein_g",
-            "carbs_g",
-            "fat_g",
-            "fiber_g",
-            "notes",
-            "foodbank_item_id",
+JSON SCHEMA (conceptual, not strict):
+
+{
+  "container": "food" | "sleep" | "exercise" | "unknown",
+  "data": {
+    // for container == "food":
+    //   "date": "YYYY-MM-DD" (optional, if missing use today),
+    //   "meal_name": string,
+    //   "calories": number or string,
+    //   "protein_g": number or string,
+    //   "carbs_g": number or string,
+    //   "fat_g": number or string,
+    //   "fiber_g": number or string,
+    //   "notes": string
+
+    // for container == "sleep":
+    //   "date": "YYYY-MM-DD" (optional, if missing use today),
+    //   "sleep_score": number or string,
+    //   "energy_score": number or string,
+    //   "duration_hr": number or string,
+    //   "resting_hr": number or string,
+    //   "sleep_start": string (optional, free text or time),
+    //   "sleep_end": string (optional, free text or time),
+    //   "notes": string
+
+    // for container == "exercise":
+    //   "date": "YYYY-MM-DD" (optional, if missing use today),
+    //   "workout_name": string,
+    //   "distance_km": number or string,
+    //   "duration_min": number or string,
+    //   "calories_burned": number or string,
+    //   "training_intensity": string or number,
+    //   "avg_hr": number or string,
+    //   "max_hr": number or string,
+    //   "training_type": string (e.g. cardio, strength),
+    //   "perceived_intensity": number or string,
+    //   "effort_description": string,
+    //   "tags": string,
+    //   "notes": string
+  },
+  "reply_text": "short confirmation message to send back to the user"
+}
+
+RULES:
+
+- If the message is clearly about FOOD (meals, calories, macros, breakfast/lunch/dinner/snack) → container = "food".
+- If it is clearly about SLEEP (hours slept, sleep quality, sleep score, energy on waking) → container = "sleep".
+- If it is clearly about EXERCISE (run, walk, gym, workout, distance, pace, sets, reps, calories burned, heart rate) → container = "exercise".
+- If it's unclear → container = "unknown" and set reply_text to ask the user what they are trying to log.
+
+- Do NOT invent macros or numbers unless the user mentions them or it is a very standard inference (e.g. "5 km run in 30 minutes" → distance_km, duration_min).
+- It is OK to leave fields out of "data" if the user didn’t provide them.
+- Do NOT guess the date; if user doesn’t give a date, omit it and let the backend fill "today".
+"""
+
+
+def call_gpt_parser(user_text: str, chat_id: int | str):
+    """Call GPT to classify + extract fields into JSON."""
+    try:
+        chat_id_str = str(chat_id)
+        messages = [
+            {"role": "system", "content": PARSER_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": f"Telegram chat_id: {chat_id_str}\nUser message: {user_text}",
+            },
         ]
-    elif container == "sleep":
-        allowed = [
-            "user_id",
-            "chat_id",
-            "date",
-            "sleep_score",
-            "energy_score",
-            "duration_hr",
-            "resting_hr",
-            "sleep_start",
-            "sleep_end",
-            "notes",
-        ]
-    elif container == "exercise":
-        allowed = [
-            "user_id",
-            "chat_id",
-            "date",
-            "workout_name",
-            "distance_km",
-            "duration_min",
-            "calories_burned",
-            "training_intensity",
-            "avg_hr",
-            "max_hr",
-            "training_type",
-            "perceived_intensity",
-            "effort_description",
-            "tags",
-            "notes",
-        ]
-    else:
-        return None  # unknown container
 
-    merged = {**data, **base}  # data wins, then we overwrite with base for core fields
-    filtered = {k: merged.get(k) for k in allowed if k in merged}
-    return filtered
+        completion = openai_client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=messages,
+            temperature=0.1,
+        )
+
+        raw = completion.choices[0].message.content
+        print(f"[GPT RAW] {raw}")
+
+        parsed = json.loads(raw)
+        return parsed
+
+    except json.JSONDecodeError as e:
+        print(f"[GPT PARSE ERROR] JSON decode failed: {e}")
+        return None
+    except Exception as e:
+        print(f"[GPT ERROR] {e}")
+        return None
 
 
-# --------------------------------------------------
+# -------------------------------
 # Webhook
-# --------------------------------------------------
+# -------------------------------
 
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
     try:
-        update = request.get_json(force=True)
-        logging.info("Incoming Telegram update: %s", update)
+        update = request.get_json(force=True, silent=True) or {}
+        print(f"[WEBHOOK] Incoming update: {json.dumps(update)}")
 
         message = update.get("message") or update.get("edited_message") or {}
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
-        user_text = message.get("text") or ""
+        user_text = message.get("text", "").strip()
 
         if not chat_id:
-            logging.error("No chat_id found in update.")
+            print("[WEBHOOK] No chat_id in update")
             return "no chat id", 200
 
         if not user_text:
-            send_telegram_message(chat_id, "I only understand text messages for now.")
+            send_telegram_message(chat_id, "I only understand text logs for now.")
             return "ok", 200
 
-        parsed = call_gpt_parser(user_text)
+        # 1) Ask GPT to classify + extract fields
+        parsed = call_gpt_parser(user_text, chat_id)
         if not parsed:
-            send_telegram_message(chat_id, "⚠️ Sorry, I couldn't process that message.")
+            send_telegram_message(chat_id, "⚠️ Sorry, I couldn’t process that. Try rephrasing?")
             return "ok", 200
 
-        container = parsed.get("container")
-        data = parsed.get("data") or {}
-        message_to_user = parsed.get("message_to_user") or "Got it."
+        container = parsed.get("container", "unknown")
+        data = parsed.get("data", {}) or {}
+        reply_text = parsed.get("reply_text") or "Got it, thanks!"
 
-        # If GPT couldn't classify, don't hit Supabase.
-        if container not in ("food", "sleep", "exercise"):
-            send_telegram_message(
-                chat_id,
-                "I couldn't figure out if this was food, sleep or exercise.\n"
-                "Please tell me which one you're trying to log."
-            )
+        # 2) Common fields
+        chat_id_str = str(chat_id)
+        today_str = today_local_date_str()
+        now_utc = now_utc_iso()
+
+        # user_id mapping (MVP: single owner)
+        user_id = None
+        if OWNER_CHAT_ID and OWNER_USER_ID and chat_id_str == OWNER_CHAT_ID:
+            user_id = OWNER_USER_ID
+
+        # helper to get date from data or default
+        date_val = data.get("date") or today_str
+
+        # 3) Route to correct container
+        if container == "food":
+            row = {
+                "user_id": user_id,
+                "chat_id": chat_id_str,
+                "date": date_val,
+                "meal_name": data.get("meal_name"),
+                "calories": data.get("calories"),
+                "protein_g": data.get("protein_g"),
+                "carbs_g": data.get("carbs_g"),
+                "fat_g": data.get("fat_g"),
+                "fiber_g": data.get("fiber_g"),
+                "notes": data.get("notes"),
+                "created_at": now_utc,
+                "recorded_at": now_utc,
+            }
+            resp = supabase_insert("food", row)
+            if not resp or resp.status_code >= 400:
+                send_telegram_message(chat_id, "⚠️ I tried to log your food but Supabase returned an error.")
+            else:
+                send_telegram_message(chat_id, reply_text)
             return "ok", 200
 
-        payload = build_payload(container, data, chat_id)
-        if payload is None:
-            send_telegram_message(
-                chat_id,
-                "Something went wrong preparing your log. Try rephrasing or specifying the type (food / sleep / exercise)."
-            )
+        elif container == "sleep":
+            row = {
+                "user_id": user_id,
+                "chat_id": chat_id_str,
+                "date": date_val,
+                "sleep_score": data.get("sleep_score"),
+                "energy_score": data.get("energy_score"),
+                "duration_hr": data.get("duration_hr"),
+                "resting_hr": data.get("resting_hr"),
+                "sleep_start": data.get("sleep_start"),
+                "sleep_end": data.get("sleep_end"),
+                "notes": data.get("notes"),
+                "created_at": now_utc,
+                "recorded_at": now_utc,
+            }
+            resp = supabase_insert("sleep", row)
+            if not resp or resp.status_code >= 400:
+                send_telegram_message(chat_id, "⚠️ I tried to log your sleep but Supabase returned an error.")
+            else:
+                send_telegram_message(chat_id, reply_text)
             return "ok", 200
 
-        ok, status_code, body_text = supabase_insert(container, payload)
+        elif container == "exercise":
+            row = {
+                "user_id": user_id,
+                "chat_id": chat_id_str,
+                "date": date_val,
+                "workout_name": data.get("workout_name"),
+                "distance_km": data.get("distance_km"),
+                "duration_min": data.get("duration_min"),
+                "calories_burned": data.get("calories_burned"),
+                "training_intensity": data.get("training_intensity"),
+                "avg_hr": data.get("avg_hr"),
+                "max_hr": data.get("max_hr"),
+                "training_type": data.get("training_type"),
+                "perceived_intensity": data.get("perceived_intensity"),
+                "effort_description": data.get("effort_description"),
+                "tags": data.get("tags"),
+                "notes": data.get("notes"),
+                "created_at": now_utc,
+                "recorded_at": now_utc,
+            }
+            resp = supabase_insert("exercise", row)
+            if not resp or resp.status_code >= 400:
+                send_telegram_message(chat_id, "⚠️ I tried to log your exercise but Supabase returned an error.")
+            else:
+                send_telegram_message(chat_id, reply_text)
+            return "ok", 200
 
-        if ok:
-            # Success – just send the friendly confirmation.
-            send_telegram_message(chat_id, message_to_user)
         else:
-            # Partial fail – tell user we understood, but DB write failed.
-            error_msg = (
-                f"{message_to_user}\n\n"
-                f"However, saving to {container} failed: "
-                f"Supabase {container} insert failed: {status_code} {body_text}"
+            # Unknown container
+            send_telegram_message(
+                chat_id,
+                "I’m not sure if that was food, sleep, or exercise.\n"
+                "What are you trying to log?"
             )
-            send_telegram_message(chat_id, error_msg)
-
-        return "ok", 200
+            return "ok", 200
 
     except Exception as e:
-        logging.error("WEBHOOK ERROR: %s", e)
+        print(f"[WEBHOOK ERROR] {e}")
+        try:
+            send_telegram_message(chat_id, "⚠️ Something went wrong on my side.")
+        except Exception:
+            pass
         return "ok", 200
 
 
-# --------------------------------------------------
+# -------------------------------
 # Health check
-# --------------------------------------------------
+# -------------------------------
 
 @app.route("/", methods=["GET"])
 def home():
@@ -356,5 +322,4 @@ def home():
 
 
 if __name__ == "__main__":
-    # Local dev
     app.run(host="0.0.0.0", port=10000)
