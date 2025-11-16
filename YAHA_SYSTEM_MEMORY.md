@@ -1,4 +1,3 @@
-1️⃣ Full YAHA_SYSTEM_MEMORY.md (copy-paste as is)
 # YAHA_SYSTEM_MEMORY.md
 
 ---
