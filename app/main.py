@@ -4,13 +4,13 @@ from openai import OpenAI
 import requests
 import json
 from datetime import datetime
-import pytz
+from zoneinfo import ZoneInfo  # built-in replacement for pytz
 
 app = Flask(__name__)
 
-# ---------------------------------------------------------
-# ENVIRONMENT VARIABLES
-# ---------------------------------------------------------
+# -------------------------------
+# Environment variables
+# -------------------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -19,110 +19,70 @@ GPT_PROMPT_ID = os.environ.get("GPT_PROMPT_ID")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Portugal timezone (user local time)
-PT_TZ = pytz.timezone("Europe/Lisbon")
+PORTUGAL_TZ = ZoneInfo("Europe/Lisbon")
 
 
-# ---------------------------------------------------------
-# TELEGRAM SEND FUNCTION
-# ---------------------------------------------------------
+# -------------------------------
+# Telegram Helpers
+# -------------------------------
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     requests.post(url, json=payload)
 
 
-# ---------------------------------------------------------
-# GPT PARSER USING NEW RESPONSES PARSE API
-# ---------------------------------------------------------
-def call_gpt_parser(prompt: str):
+# -------------------------------
+# GPT PARSER v3 (container detection + JSON)
+# -------------------------------
+def call_gpt_parser(prompt):
     try:
         response = openai_client.responses.parse(
             model="gpt-4.1-mini",
             input=prompt,
-            instruction=f"Use parser: {GPT_PROMPT_ID}"
         )
         return response.output
+
     except Exception as e:
         print("GPT PARSE ERROR:", e)
         return None
 
 
-# ---------------------------------------------------------
-# SUPABASE INSERT HELPER
-# ---------------------------------------------------------
-def insert_into_supabase(table: str, payload: dict):
-    try:
-        url = f"{SUPABASE_URL}/{table}"
-        headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        r = requests.post(url, headers=headers, json=payload)
-
-        print("SUPABASE INSERT RESPONSE:", r.status_code, r.text)
-
-        return r.status_code in (200, 201)
-    except Exception as e:
-        print("SUPABASE INSERT ERROR:", e)
-        return False
+# -------------------------------
+# Utility: get today's date in Portugal
+# -------------------------------
+def get_local_date():
+    return datetime.now(PORTUGAL_TZ).strftime("%Y-%m-%d")
 
 
-# ---------------------------------------------------------
-# AUTO CONTAINER DETECTION
-# ---------------------------------------------------------
-def detect_container(text: str):
-    t = text.lower()
-
-    # Strong FOOD keywords
-    if any(w in t for w in ["kcal", "calories", "protein", "carbs", "fat", "ate", "meal",
-                            "breakfast", "lunch", "dinner", "snack"]):
-        return "food"
-
-    # Strong SLEEP keywords
-    if any(w in t for w in ["slept", "sleep", "rem", "deep sleep", "resting hr"]):
-        return "sleep"
-
-    # Strong EXERCISE keywords
-    if any(w in t for w in ["run", "ran", "walking", "walked", "km", "pace",
-                            "workout", "gym", "exercise", "sets", "reps", "hr"]):
-        return "exercise"
-
-    return None
-
-
-# ---------------------------------------------------------
-# BUILD PAYLOAD FOR SUPABASE (ADD user_id + auto date)
-# ---------------------------------------------------------
-def build_payload(chat_id, parsed: dict):
-    # Auto-fill date based on Portugal time
-    now_pt = datetime.now(PT_TZ).date()
-
-    payload = {
-        "chat_id": str(chat_id),
-        "user_id": str(chat_id),   # <-- FIXED HERE
-        "date": parsed.get("date", str(now_pt))
+# -------------------------------
+# Utility: Supabase POST Wrapper
+# -------------------------------
+def supabase_insert(table, row):
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
     }
 
-    # Merge in all GPT fields (skips date & user_id)
-    for key, value in parsed.items():
-        if key not in ["user_id"]:
-            payload[key] = value
+    r = requests.post(url, headers=headers, json=row)
 
-    return payload
+    if r.status_code >= 300:
+        print(f"SUPABASE ERROR ({table}):", r.text)
+    else:
+        print(f"SUPABASE OK ({table}):", r.text)
+
+    return r.status_code, r.text
 
 
-# ---------------------------------------------------------
-# TELEGRAM WEBHOOK
-# ---------------------------------------------------------
+# -------------------------------
+# /webhook — MAIN INGESTION ENTRY
+# -------------------------------
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
     try:
         update = request.get_json()
-        print("INCOMING UPDATE:", json.dumps(update))
-
         message = update.get("message", {})
         chat_id = message.get("chat", {}).get("id")
         user_text = message.get("text", "")
@@ -130,47 +90,41 @@ def telegram_webhook():
         if not chat_id:
             return "no chat id", 200
 
-        # 1️⃣ Auto-detect container
-        detected = detect_container(user_text)
-
-        # 2️⃣ Parse with GPT
         parsed = call_gpt_parser(user_text)
-        print("GPT PARSED:", parsed)
 
-        if not parsed:
+        if parsed is None:
             send_telegram_message(chat_id, "⚠️ Sorry, I couldn’t process that.")
             return "ok", 200
 
-        # If GPT returns text → send it
+        # String → just echo it
         if isinstance(parsed, str):
             send_telegram_message(chat_id, parsed)
             return "ok", 200
 
-        # Must be dict for container inserts
-        if not isinstance(parsed, dict):
-            send_telegram_message(chat_id, str(parsed))
-            return "ok", 200
-
-        # 3️⃣ Determine container (if GPT already labels it)
-        container = parsed.get("container") or detected
+        # -------------------------------
+        # JSON_OUTPUT → container logic
+        # -------------------------------
+        container = parsed.get("container")
 
         if not container:
-            send_telegram_message(
-                chat_id,
-                "I’m not sure if this is food, exercise, or sleep.\nWhich one is it?"
-            )
+            send_telegram_message(chat_id, "I didn’t understand what to log. Food, sleep, or exercise?")
             return "ok", 200
 
-        # 4️⃣ Build proper payload with user_id + date
-        payload = build_payload(chat_id, parsed)
+        # Force user_id = chat_id (temporary rule)
+        parsed["user_id"] = str(chat_id)
+        parsed["chat_id"] = str(chat_id)
 
-        # 5️⃣ Insert into Supabase
-        success = insert_into_supabase(container, payload)
+        # Auto-fill date if missing
+        if "date" not in parsed or not parsed["date"]:
+            parsed["date"] = get_local_date()
 
-        if success:
-            send_telegram_message(chat_id, f"✅ Logged to *{container}* successfully.")
+        # Insert into Supabase
+        status, resp = supabase_insert(container, parsed)
+
+        if status < 300:
+            send_telegram_message(chat_id, f"Logged your {container} entry 👍")
         else:
-            send_telegram_message(chat_id, f"❌ Failed to log {container}. Check logs.")
+            send_telegram_message(chat_id, f"⚠️ Error logging {container}. Check logs.")
 
         return "ok", 200
 
@@ -179,9 +133,9 @@ def telegram_webhook():
         return "ok", 200
 
 
-# ---------------------------------------------------------
-# HEALTH CHECK
-# ---------------------------------------------------------
+# -------------------------------
+# Health check
+# -------------------------------
 @app.route("/", methods=["GET"])
 def home():
     return "OK", 200
