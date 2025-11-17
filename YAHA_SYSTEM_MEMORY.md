@@ -677,7 +677,38 @@ Every test produced GPT PARSE ERROR in Render logs and no Supabase insertion.
 Status:
 ❌ Failed — Requires new build that corrects the Responses API request structure.
 
+[2025-11-17] — Build 008 — JSON Parse Error Hotfix
 
+Summary: Bot regained connection to parser, but ingestion now fails with "name 'null' is not defined" during JSON parse.
+
+Problem:
+
+OpenAI returned "null" (valid JSON),
+
+but Python tries to eval() it somewhere,
+
+or our JSON loader was replaced with a Python eval unsafe parse,
+
+so "null" becomes an undefined Python symbol → crash.
+
+What changed (root cause):
+
+In Build 006/007 parts of the parser-handling block were rewritten.
+
+Somewhere "json.loads(...)" was swapped for something that tries to interpret the string as Python notation (eval, or missing json= parameter in the response).
+
+Because JSON uses null but Python uses None, Python throws:
+"name 'null' is not defined".
+
+How it was tested:
+
+User sent a food → sleep → exercise message.
+
+Telegram bot responded (“Sorry, I could not process that.”), proving parser responded but JSON parsing failed.
+
+Render logs show multiple crashes with identical signature.
+
+Status: ❌ Failed build — needs enforced json.loads() for all parsing paths + validation of returned structure.
 
 ---
 
