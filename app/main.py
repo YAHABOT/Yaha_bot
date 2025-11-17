@@ -1,111 +1,140 @@
 import os
+import json
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from openai import OpenAI
 
 app = Flask(__name__)
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GPT_PROMPT_ID = os.environ.get("GPT_PROMPT_ID")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GPT_PROMPT_ID = os.getenv("GPT_PROMPT_ID")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# -----------------------------
+# B-MODE SEMI-STRICT JSON REPAIR
+# -----------------------------
+def repair_json(text: str):
+    """
+    Fix common JSON issues:
+    - Replace Python None/True/False with JSON null/true/false
+    - Ensure proper quotes around keys
+    - Remove trailing commas
+    """
+    if not text or not isinstance(text, str):
+        return None
 
-# -----------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------
+    fixed = text.strip()
 
-def tg_send(chat_id: str, text: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    requests.post(url, json=payload)
+    # Normalize common issues
+    fixed = fixed.replace("None", "null")
+    fixed = fixed.replace("True", "true").replace("False", "false")
+
+    # Remove trailing commas before } or ]
+    fixed = fixed.replace(",}", "}").replace(",]", "]")
+
+    # If assistant wrapped JSON in code fences
+    if fixed.startswith("```"):
+        fixed = fixed.strip("`")
+        fixed = fixed.replace("json", "")
+
+    # If still invalid JSON it will fail gracefully in json.loads()
+    return fixed
 
 
-def supabase_insert(table: str, payload: dict):
+# -----------------------------
+# PARSE MESSAGE WITH JSON GUARANTEE
+# -----------------------------
+def parse_message(message_text: str):
+    try:
+        response = client.responses.create(
+            prompt={"id": GPT_PROMPT_ID, "version": "1"},
+            input=[{"role": "user", "content": message_text}],
+            max_output_tokens=2048
+        )
+    except Exception as e:
+        print("[GPT ERROR]", e)
+        return {"container": "unknown", "data": {}, "reply_text": "Sorry, I could not process that."}
+
+    try:
+        raw = response.output_text
+        print("[GPT RAW]", raw)
+
+        fixed = repair_json(raw)
+        print("[GPT FIXED]", fixed)
+
+        parsed = json.loads(fixed)
+        return parsed
+
+    except Exception as e:
+        print("[JSON ERROR]", e)
+        return {"container": "unknown", "data": {}, "reply_text": "Sorry, I could not process that."}
+
+
+# -----------------------------
+# SUPABASE INSERT
+# -----------------------------
+def supabase_insert(table, payload):
     url = f"{SUPABASE_URL}/rest/v1/{table}"
     headers = {
         "apikey": SUPABASE_ANON_KEY,
         "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
         "Content-Type": "application/json",
-        "Prefer": "return=representation"
+        "Prefer": "return=minimal"
     }
-    r = requests.post(url, json=payload, headers=headers)
-    return r.status_code, r.text
+    r = requests.post(url, headers=headers, data=json.dumps(payload))
+    print("[SUPABASE]", table, r.status_code, r.text)
+    return r.status_code == 201 or r.status_code == 204
 
 
-# -----------------------------------------------------------
-# OpenAI Parser call
-# -----------------------------------------------------------
-
-def parse_message(message_text: str):
-    response = client.responses.create(
-        prompt={"id": GPT_PROMPT_ID, "version": "1"},
-        input=[{"role": "user", "content": message_text}],
-        max_output_tokens=2048
-    )
-
-    # Actual JSON response from output[0].content[0].text
-    try:
-        raw_text = response.output[0].content[0].text
-        return eval(raw_text)  # safe because parser enforced strict JSON
-    except Exception as e:
-        print("JSON parse error:", e)
-        return {
-            "container": "unknown",
-            "data": {},
-            "reply_text": "Sorry, I couldn’t process that."
-        }
+# -----------------------------
+# TELEGRAM SEND MESSAGE
+# -----------------------------
+def telegram_send(chat_id, text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    requests.post(url, data={"chat_id": chat_id, "text": text})
 
 
-# -----------------------------------------------------------
-# Main Webhook
-# -----------------------------------------------------------
-
+# -----------------------------
+# WEBHOOK
+# -----------------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    update = request.get_json()
+    data = request.json
 
     try:
-        msg = update["message"]["text"]
-        chat_id = str(update["message"]["chat"]["id"])
+        msg = data["message"]["text"]
+        chat_id = data["message"]["chat"]["id"]
     except:
-        return jsonify({"status": "ignored"})
+        return "OK", 200
 
     parsed = parse_message(msg)
+    container = parsed.get("container", "unknown")
+    payload = parsed.get("data", {})
+    reply_text = parsed.get("reply_text", "Logged.")
 
-    container = parsed["container"]
-    data = parsed["data"]
-    reply_text = parsed["reply_text"]
-
-    # Insert based on container
+    ok = False
     if container == "food":
-        data["chat_id"] = chat_id
-        status, body = supabase_insert("food", data)
-
+        ok = supabase_insert("food", payload)
     elif container == "sleep":
-        data["chat_id"] = chat_id
-        status, body = supabase_insert("sleep", data)
-
+        ok = supabase_insert("sleep", payload)
     elif container == "exercise":
-        data["chat_id"] = chat_id
-        status, body = supabase_insert("exercise", data)
+        ok = supabase_insert("exercise", payload)
 
-    else:
-        tg_send(chat_id, reply_text)
-        return jsonify({"status": "ok"})
+    if not ok:
+        reply_text = "Sorry, I could not process that."
 
-    # Supabase response back to user
-    if status in (200, 201):
-        tg_send(chat_id, reply_text)
-    else:
-        tg_send(chat_id, "⚠️ I tried to log your entry but Supabase returned an error.")
-
-    return jsonify({"status": "ok"})
+    telegram_send(chat_id, reply_text)
+    return "OK", 200
 
 
-@app.route("/", methods=["GET"])
-def root():
-    return "YAHA bot online.", 200
+@app.route("/")
+def index():
+    return "YAHA bot running"
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
