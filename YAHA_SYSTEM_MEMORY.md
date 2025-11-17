@@ -622,6 +622,25 @@ Status: ❌ Failed deploy. Needs follow-up build that adds pytz to requirements 
   - Render logs confirmed 404 for all 3 (bad).  
   - Supabase dashboard showed no new rows (bad).
 - **Status:** ❌ Failed build — needs corrected REST path assembly and table name mapping.
+- [2025-11-16] — Build 006 — GPT Prompt ID missing (model_not_found)
+
+- Summary: After fixing Supabase path issues in Build 005, all parsing stopped working because the configured GPT_PROMPT_ID points to a deleted or invalid OpenAI prompt resource.
+- Problem:
+  - Render logs show: `model_not_found` for model `pmpt_690e9eb161048193a9e4d70bafc9608c0e5c9a3566d93187`.
+  - This means the OpenAI Prompt Cache resource no longer exists.
+  - As a result, `openai.responses.parse()` fails instantly and returns None.
+  - The webhook goes into fallback → bot replies “Sorry, I could not process that.”
+  - Supabase receives **zero** inserts.
+- What changed:
+  - No code change — the underlying OpenAI prompt ID became invalid.
+  - All containers (food, sleep, exercise) failed equally.
+- How it was tested:
+  - Sent 3 logs (food → sleep → exercise).
+  - Parser returned `None` each time.
+  - Telegram output: “Sorry, I could not process that.”
+  - Render logs: `Error code: 400 model_not_found`.
+- Status: ❌ Failed — system cannot parse anything until a new PROMPT_ID is created and added to Render.
+
 
 
 ---
