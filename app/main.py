@@ -1,145 +1,111 @@
 import os
-from flask import Flask, request
-from openai import OpenAI
 import requests
-import json
-from datetime import datetime
-import pytz
+from flask import Flask, request, jsonify
+from openai import OpenAI
 
 app = Flask(__name__)
 
-# ----------------------------------------
-# ENVIRONMENT VARS
-# ----------------------------------------
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-SUPABASE_URL = os.environ.get("SUPABASE_URL").rstrip("/")
-SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GPT_PROMPT_ID = os.environ.get("GPT_PROMPT_ID")
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ----------------------------------------
-# HELPERS
-# ----------------------------------------
-def send_telegram_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+# -----------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------
+
+def tg_send(chat_id: str, text: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
-    try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print("TELEGRAM SEND ERROR:", e)
+    requests.post(url, json=payload)
 
 
-def today_portugal_date():
-    tz = pytz.timezone("Europe/Lisbon")
-    return datetime.now(tz).date().isoformat()
-
-
-# ----------------------------------------
-# GPT PARSER (Responses API w/ prompt ID)
-# ----------------------------------------
-def call_gpt_parser(user_text):
-    try:
-        response = openai_client.responses.parse(
-            model=GPT_PROMPT_ID,
-            input=user_text
-        )
-        return response.output
-    except Exception as e:
-        print("GPT PARSE ERROR:", e)
-        return None
-
-
-# ----------------------------------------
-# SUPABASE INSERT
-# ----------------------------------------
-def supabase_insert(table, row):
+def supabase_insert(table: str, payload: dict):
     url = f"{SUPABASE_URL}/rest/v1/{table}"
     headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
         "Content-Type": "application/json",
         "Prefer": "return=representation"
     }
+    r = requests.post(url, json=payload, headers=headers)
+    return r.status_code, r.text
 
-    print("[SUPABASE] POST", url)
-    print("[SUPABASE] PAYLOAD:", row)
 
+# -----------------------------------------------------------
+# OpenAI Parser call
+# -----------------------------------------------------------
+
+def parse_message(message_text: str):
+    response = client.responses.create(
+        prompt={"id": GPT_PROMPT_ID, "version": "3"},
+        input=[{"role": "user", "content": message_text}],
+        max_output_tokens=2048
+    )
+
+    # Actual JSON response from output[0].content[0].text
     try:
-        resp = requests.post(url, headers=headers, data=json.dumps(row))
-        print("[SUPABASE] STATUS:", resp.status_code, "BODY:", resp.text)
-        return resp.status_code, resp.text
+        raw_text = response.output[0].content[0].text
+        return eval(raw_text)  # safe because parser enforced strict JSON
     except Exception as e:
-        print("[SUPABASE REQUEST ERROR]", e)
-        return 500, str(e)
+        print("JSON parse error:", e)
+        return {
+            "container": "unknown",
+            "data": {},
+            "reply_text": "Sorry, I couldn’t process that."
+        }
 
 
-# ----------------------------------------
-# MAIN WEBHOOK
-# ----------------------------------------
+# -----------------------------------------------------------
+# Main Webhook
+# -----------------------------------------------------------
+
 @app.route("/webhook", methods=["POST"])
-def telegram_webhook():
+def webhook():
+    update = request.get_json()
+
     try:
-        update = request.get_json()
-        print("[WEBHOOK] Incoming:", update)
+        msg = update["message"]["text"]
+        chat_id = str(update["message"]["chat"]["id"])
+    except:
+        return jsonify({"status": "ignored"})
 
-        message = update.get("message", {})
-        chat_id = message.get("chat", {}).get("id")
-        user_text = message.get("text", "")
+    parsed = parse_message(msg)
 
-        if not chat_id:
-            return "no chat id", 200
+    container = parsed["container"]
+    data = parsed["data"]
+    reply_text = parsed["reply_text"]
 
-        parsed = call_gpt_parser(user_text)
-        print("[GPT RAW]", parsed)
+    # Insert based on container
+    if container == "food":
+        data["chat_id"] = chat_id
+        status, body = supabase_insert("food", data)
 
-        if parsed is None:
-            send_telegram_message(chat_id, "⚠️ Sorry, I could not process that.")
-            return "ok", 200
+    elif container == "sleep":
+        data["chat_id"] = chat_id
+        status, body = supabase_insert("sleep", data)
 
-        # MUST be dict with correct keys:
-        # { container: "...", data: {...}, reply_text: "..." }
-        container = parsed.get("container")
-        data = parsed.get("data", {})
-        reply_text = parsed.get("reply_text", "Logged it.")
+    elif container == "exercise":
+        data["chat_id"] = chat_id
+        status, body = supabase_insert("exercise", data)
 
-        # --- Auto-fill date if missing ---
-        if not data.get("date"):
-            data["date"] = today_portugal_date()
+    else:
+        tg_send(chat_id, reply_text)
+        return jsonify({"status": "ok"})
 
-        # Always include chat_id + user_id
-        data["chat_id"] = str(chat_id)
-        data["user_id"] = None  # MVP
+    # Supabase response back to user
+    if status in (200, 201):
+        tg_send(chat_id, reply_text)
+    else:
+        tg_send(chat_id, "⚠️ I tried to log your entry but Supabase returned an error.")
 
-        if container not in ["food", "sleep", "exercise"]:
-            send_telegram_message(chat_id, "⚠️ I’m not sure what to log.")
-            return "ok", 200
-
-        # Insert into Supabase
-        status, body = supabase_insert(container, data)
-
-        if status in (200, 201):
-            send_telegram_message(chat_id, reply_text)
-        else:
-            send_telegram_message(chat_id,
-                f"⚠️ I tried to log your {container} but Supabase returned an error."
-            )
-
-        return "ok", 200
-
-    except Exception as e:
-        print("[WEBHOOK ERROR]", e)
-        return "ok", 200
+    return jsonify({"status": "ok"})
 
 
-# ----------------------------------------
-# HEALTH CHECK
-# ----------------------------------------
 @app.route("/", methods=["GET"])
-def home():
-    return "OK", 200
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+def root():
+    return "YAHA bot online.", 200
