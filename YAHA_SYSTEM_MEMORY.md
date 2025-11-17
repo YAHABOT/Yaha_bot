@@ -641,6 +641,42 @@ Status: ❌ Failed deploy. Needs follow-up build that adds pytz to requirements 
   - Render logs: `Error code: 400 model_not_found`.
 - Status: ❌ Failed — system cannot parse anything until a new PROMPT_ID is created and added to Render.
 
+[2025-11-17] — Build 007 — GPT Responses API call failing (wrong request shape)
+
+Summary:
+Parser failed before container detection because the API call format to `client.responses.create()` did not match the required schema of the Responses API, causing immediate 400-level model errors.
+
+Problem:
+Render runtime logs showed repeated failures:
+`GPT PARSE ERROR: model_not_found`  
+and responses containing `"requested model does not exist"`.
+
+This did NOT mean the prompt ID was wrong. The issue was:
+- The request payload sent by main.py used fields that the Responses API does not accept.
+- The `input=` block was formatted incorrectly or missing.
+- The prompt attachment object was not invoked with the correct structure version.
+
+As a result:
+- GPT never produced a parsed container.
+- No Supabase insert logic ran.
+- Telegram only returned fallback messages.
+- All test logs (food, sleep, exercise) failed at the same stage.
+
+Changes:
+None applied yet. This build only documents the failure and root cause.
+Actual fixes will be included in Build 008.
+
+How it was tested:
+Sent three inputs through Telegram:
+- Food log (“oats with protein powder”)
+- Sleep log (“slept 7 hours, HR 55”)
+- Exercise log (“5km run 30 mins”)
+
+Every test produced GPT PARSE ERROR in Render logs and no Supabase insertion.
+
+Status:
+❌ Failed — Requires new build that corrects the Responses API request structure.
+
 
 
 ---
