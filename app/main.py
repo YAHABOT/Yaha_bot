@@ -42,7 +42,7 @@ def supabase_insert(table: str, payload: dict):
 
 def parse_message(message_text: str):
     response = client.responses.create(
-        prompt={"id": GPT_PROMPT_ID, "version": "3"},
+        prompt={"id": GPT_PROMPT_ID, "version": "1"},
         input=[{"role": "user", "content": message_text}],
         max_output_tokens=2048
     )
