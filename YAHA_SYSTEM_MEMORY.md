@@ -729,6 +729,24 @@ After migration, schema accepted manual inserts of numeric values without type e
 
 Status: ✅ Stable — backend ready for new main.py build.
 
+[2025-11-19] – Build 010 – Critical Fix: Wrong Supabase URL
+
+Issue:
+All inserts for food/sleep/exercise failed with Supabase error PGRST125 ("Invalid path specified in request URL"). Render logs showed correct JSON, correct rows, correct API key — but wrong Supabase URL.
+
+Cause:
+SUPABASE_URL environment variable was mistakenly set to the Supabase *dashboard* URL instead of the Supabase *project REST endpoint* URL.
+
+Fix:
+Retrieve the real project API URL:
+Supabase → Project Settings → API → "Project URL"
+Set SUPABASE_URL = that value (ending in `.supabase.co`)
+Do NOT include `/rest/v1` (code appends it automatically).
+
+Status:
+Blocking issue resolved. Ready for retest once URL updated.
+
+
 
 ---
 
