@@ -710,6 +710,26 @@ Render logs show multiple crashes with identical signature.
 
 Status: ❌ Failed build — needs enforced json.loads() for all parsing paths + validation of returned structure.
 
+[2025-11-19] — Build 009 — Correct Supabase Column Types (Food/Sleep/Exercise)
+
+Summary:
+Converted all user-input columns from TEXT → proper numeric/timestamp types (INTEGER, DOUBLE PRECISION, TIMESTAMPTZ).
+
+Problem:
+Supabase inserts were failing with 404/400 errors because numbers were being sent as numeric, but the database was expecting TEXT. This mismatch broke the pipeline and caused all inserts to fail.
+
+What we changed:
+- Updated food table: calories, protein_g, carbs_g, fat_g, fiber_g → DOUBLE PRECISION.
+- Updated sleep table: scores → INTEGER, duration_hr → DOUBLE, HR → INTEGER, timestamps → TIMESTAMPTZ.
+- Updated exercise table: numeric performance fields → INTEGER/DOUBLE.
+- Left system columns untouched.
+
+How tested:
+After migration, schema accepted manual inserts of numeric values without type errors (verified inside SQL editor).
+
+Status: ✅ Stable — backend ready for new main.py build.
+
+
 ---
 
 
