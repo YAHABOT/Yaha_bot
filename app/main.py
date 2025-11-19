@@ -1,135 +1,113 @@
 import os
 from flask import Flask, request
-from datetime import datetime
 from supabase import create_client, Client
 from openai import OpenAI
+from datetime import datetime
+import pytz
 
+# ================================
+# INIT
+# ================================
 app = Flask(__name__)
 
-# -------------------------------------------------
-# ENV
-# -------------------------------------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GPT_PROMPT_ID = os.getenv("GPT_PROMPT_ID")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# -------------------------------------------------
-# INIT CLIENTS
-# -------------------------------------------------
 client = OpenAI(api_key=OPENAI_API_KEY)
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-# -------------------------------------------------
-# PARSER
-# -------------------------------------------------
-def parse_message(text: str):
-    """Send user text to GPT prompt → get container + structured JSON."""
-    try:
-        response = client.responses.create(
-            prompt={"id": GPT_PROMPT_ID, "version": "1"},
-            input=[{"role": "user", "content": text}],
-            max_output_tokens=2048
-        )
-        return response.output[0].content[0].text
-    except Exception as e:
-        print("GPT PARSE ERROR:", e)
-        return None
+UTC = pytz.UTC
 
-# -------------------------------------------------
-# CLEAN NONE VALUES
-# -------------------------------------------------
-def clean_dict(d: dict) -> dict:
-    """Convert None to actual null values for Supabase insert."""
-    return {k: (v if v is not None else None) for k, v in d.items()}
+def today():
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
-# -------------------------------------------------
-# SUPABASE INSERT
-# -------------------------------------------------
-def insert_into_supabase(container: str, data: dict):
-    try:
-        result = supabase.table(container).insert(data).execute()
-        print(f"[SUPABASE {container}] →", result)
-        return result
-    except Exception as e:
-        print(f"[SUPABASE ERROR {container}] →", e)
-        return None
+# ================================
+# PARSE MESSAGE WITH OPENAI
+# ================================
+def parse_message(message_text: str):
+    """
+    Sends the user's text to the GPT prompt and expects strict JSON back.
+    """
+    response = client.responses.create(
+        prompt={"id": GPT_PROMPT_ID, "version": "1"},
+        input=[{"role": "user", "content": message_text}],
+        max_output_tokens=512
+    )
 
-# -------------------------------------------------
-# TELEGRAM WEBHOOK
-# -------------------------------------------------
+    raw = response.output[0].content[0].text
+    print("[GPT RAW]", raw)
+
+    import json
+    return json.loads(raw)
+
+# ================================
+# ROUTES
+# ================================
+@app.route("/", methods=["GET"])
+def home():
+    return "YAHA bot running"
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    update = request.get_json()
+    data = request.json
+    print("[TG UPDATE]", data)
 
-    if "message" not in update:
+    if "message" not in data:
         return "no message", 200
 
-    msg = update["message"]
+    msg = data["message"]
     chat_id = str(msg["chat"]["id"])
-    user_id = str(msg["from"]["id"])
     text = msg.get("text", "")
+    date_val = today()
 
-    print("[TG UPDATE]", update)
     print("[RAW USER TEXT]", text)
 
-    parsed_raw = parse_message(text)
-    if parsed_raw is None:
-        send_message(chat_id, "❌ Sorry, I could not process that.")
-        return "ok", 200
-
-    print("[GPT RAW]", parsed_raw)
-
     try:
-        parsed = eval(parsed_raw)
-    except:
-        send_message(chat_id, "❌ Invalid structured response.")
+        parsed = parse_message(text)
+    except Exception as e:
+        print("[GPT ERROR]", e)
+        send_message(chat_id, "⚠️ Sorry, I could not process that.")
         return "ok", 200
 
     print("[GPT JSON]", parsed)
 
-    container = parsed.get("container", "unknown")
-    data = parsed.get("data", {})
+    container = parsed["container"]
+    final_data = parsed["data"]
+    final_data["chat_id"] = chat_id
+    final_data["date"] = date_val
 
-    # Add system fields
-    data["chat_id"] = chat_id
-    data["user_id"] = user_id      # TEXT column now
-    data["date"] = datetime.utcnow().strftime("%Y-%m-%d")
+    print(f"[FINAL DATA → {container}]", final_data)
 
-    print(f"[FINAL DATA → {container}]:", data)
-
-    clean = clean_dict(data)
-
-    # Insert
-    insert_into_supabase(container, clean)
-
-    # Reply
-    reply_text = parsed.get("reply_text", "Logged!")
-    send_message(chat_id, reply_text)
+    # ================================
+    # SUPABASE INSERT
+    # ================================
+    try:
+        supabase.table(container).insert(final_data).execute()
+        send_message(chat_id, parsed["reply_text"])
+    except Exception as e:
+        print(f"[SUPABASE ERROR {container}]", e)
+        send_message(chat_id, f"❌ Could not log entry.\n{e}")
 
     return "ok", 200
 
-# -------------------------------------------------
-# TELEGRAM SEND MESSAGE
-# -------------------------------------------------
+# ================================
+# TG SEND MESSAGE
+# ================================
 import requests
 
-def send_message(chat_id: str, text: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+def send_message(chat_id, text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     try:
         requests.post(url, json=payload)
     except:
         pass
 
-# -------------------------------------------------
-
-@app.route("/")
-def home():
-    return "YAHA bot alive", 200
-
-# -------------------------------------------------
-
+# ================================
+# START
+# ================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
