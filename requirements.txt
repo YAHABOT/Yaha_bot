@@ -1,8 +1,9 @@
 Flask
 requests
-openai>=1.0.0
+openai
 gunicorn
 pydub
 SpeechRecognition
 pytz
 supabase
+python-dotenv
