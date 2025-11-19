@@ -5,3 +5,4 @@ gunicorn
 pydub
 SpeechRecognition
 pytz
+supabase
