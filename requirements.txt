@@ -5,5 +5,5 @@ gunicorn
 pydub
 SpeechRecognition
 pytz
-supabase
+supabase-py
 python-dotenv
