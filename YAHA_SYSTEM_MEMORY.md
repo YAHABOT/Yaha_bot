@@ -746,6 +746,95 @@ Do NOT include `/rest/v1` (code appends it automatically).
 Status:
 Blocking issue resolved. Ready for retest once URL updated.
 
+CHANGELOG 011 — User ID Removal + Schema Cleanup + Successful Insert Ops
+Date: 2025-11-19
+Build: 011
+Status: Successful
+
+1) user_id removed entirely from food, sleep, and exercise tables.
+Reason:
+- user_id caused UUID mismatch errors
+- foreign key conflicts
+- invalid input syntax failures
+- redundant because chat_id is already unique per user
+
+Action:
+- Dropped user_id from all three tables
+- Removed all user_id usage from the Python code
+- All inserts now only use chat_id + date + container fields
+
+Result:
+- No more UUID errors
+- No constraint failures
+- Clean inserts across all containers
+
+2) Standardized all numeric column types
+
+FOOD TABLE TYPES:
+- calories: float8
+- protein_g: float8
+- carbs_g: float8
+- fat_g: float8
+- fiber_g: float8
+- meal_name: text
+- notes: text
+- chat_id: text
+- date: date
+
+SLEEP TABLE TYPES:
+- sleep_score: int
+- energy_score: int
+- duration_hr: float8
+- resting_hr: int
+- sleep_start: timestamp
+- sleep_end: timestamp
+- notes: text
+- chat_id: text
+- date: date
+
+EXERCISE TABLE TYPES:
+- workout_name: text
+- distance_km: float8
+- duration_min: int
+- calories_burned: int
+- training_intensity: int
+- avg_hr: int
+- max_hr: int
+- training_type: text
+- perceived_intensity: int
+- effort_description: text
+- tags: text
+- notes: text
+- chat_id: text
+- date: date
+
+Result:
+- All numerical fields accept proper numerical input
+- No conversion errors
+
+3) Code adjustments
+- Removed all references to user_id
+- Updated insert payloads to match new schema
+- Only writes fields that exist in DB
+- All containers now write using chat_id and date
+
+4) Live test confirmation
+Food insert: SUCCESS
+Sleep insert: SUCCESS
+Exercise insert: SUCCESS
+
+All rows inserted correctly with:
+chat_id = 2052083060
+date = 2025-11-19
+
+5) Build summary
+- user_id removed permanently
+- schema cleaned and normalized
+- number types fixed
+- main.py updated
+- all insert operations functioning as expected
+
+Build 011 marked as stable.
 
 
 ---
