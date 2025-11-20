@@ -11,6 +11,7 @@ import pytz
 from app.parser.engine import parse_message
 from app.utils.time import today
 from app.services.telegram import send_message
+from app.services.supabase import insert_record
 
 # ================================
 # INIT
@@ -71,15 +72,17 @@ def webhook():
     print(f"[FINAL DATA → {container}]", final_data)
 
     # ================================
-    # SUPABASE INSERT
+    # SUPABASE INSERT (through the service)
     # ================================
-    try:
-        supabase.table(container).insert(final_data).execute()
-        send_message(chat_id, parsed["reply_text"])
-    except Exception as e:
-        print(f"[SUPABASE ERROR {container}]", e)
-        send_message(chat_id, f"❌ Could not log entry.\n{e}")
+    response, error = insert_record(container, final_data)
 
+    if error:
+        print(f"[SUPABASE ERROR {container}]", error)
+        send_message(chat_id, f"❌ Could not log entry.\n{error}")
+        return "ok", 200
+
+    # Success
+    send_message(chat_id, parsed["reply_text"])
     return "ok", 200
 
 
