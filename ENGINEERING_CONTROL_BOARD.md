@@ -63,8 +63,8 @@ Transform the backend from a single-file fragile structure into a clean, stable,
 - Render deploy succeeds without regression
 
 ### Status:
-🔄 In Progress  
-(Do not proceed to Step 2 until operator confirms Step 1 is LOCKED.)
+✔ Completed  
+✔ Locked  
 
 ---
 
@@ -83,7 +83,8 @@ Make the GPT parser deterministic, schema-safe, and version-controlled.
 - Integration-tested with Supabase inserts
 
 ### Status:
-⏳ Locked (cannot start)
+🔄 In Progress  
+(Do not proceed to Step 3 until operator confirms Step 2 is LOCKED.)
 
 ---
 
