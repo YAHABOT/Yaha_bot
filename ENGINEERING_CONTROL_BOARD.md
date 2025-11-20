@@ -88,21 +88,56 @@ Make the GPT parser deterministic, schema-safe, and version-controlled.
 
 ---
 
-## 🤖 STEP 3 — TELEGRAM UX (Locked)
+## 🤖 STEP 3 — TELEGRAM UX & MEDIA INGESTION PIPELINE (Locked)
 
 ### Goal:
-Transform the bot from raw text into a polished user experience.
+Transform the bot from a text-only logger into a multimedia ingestion interface supporting images, screenshots, barcodes, and voice notes — while providing polished, guided Telegram UX with confirmations and recovery flows.
 
-### Definition of DONE:
-- Inline buttons for common actions
-- Multi-step flows for food/sleep/exercise
-- Error recovery flows
-- Clean, structured confirmations
-- Shortcut flows
-- Full Telegram UX smoothing
+---
+
+### 3A — Media Ingestion Pipeline (Images, Screenshots, Voice Notes)
+
+#### Definition of DONE:
+- Telegram file download implemented for:
+  - Photos (JPG/PNG)
+  - Screenshots
+  - Barcodes (photo-based)
+  - Voice notes (OGG/MP3/OPUS)
+- OCR layer integrated (OpenAI Vision or Tesseract/Turbo OCR)
+  - Extract structured text from meal photos, nutrition labels, screenshots
+  - Extract layout-aware text blocks for better container mapping
+- ASR layer integrated (OpenAI Whisper or server-side STT)
+  - Convert voice notes into clean text
+  - Normalize filler words, timing words, conversational phrases
+- Barcode to nutrition lookup path created
+- Pre-parser sanitization layer created to clean OCR/ASR outputs
+- Confidence scoring integrated (low confidence → ask user)
+- Error/fallback path for:
+  - Blurry photos
+  - Partial OCR
+  - Unclear voice transcriptions
+  - Empty or short results
+- Raw media links stored in entries for audit/recovery
+
+---
+
+### 3B — Telegram Conversational UX
+
+#### Definition of DONE:
+- Inline buttons for Food / Sleep / Workouts / More
+- Multi-step guided flows
+- Shortcut actions for frequent logs
+- Clear confirmation messages (“Log this?” → Yes/No)
+- Error recovery flows for media ingestion failures
+- Consistent message formatting
+- UX smoothing across all containers
+- Optional strict-mode paths (Food Bank lookups, raw paste validations)
+
+---
 
 ### Status:
-⏳ Locked
+🔒 Locked until Step 2 (Parser Engine) is completed.
+
 
 ---
 
