@@ -7,3 +7,4 @@ SpeechRecognition
 pytz
 supabase
 python-dotenv
+jsonschema
