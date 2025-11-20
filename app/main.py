@@ -4,13 +4,13 @@ from supabase import create_client, Client
 from openai import OpenAI
 from datetime import datetime
 import pytz
-import requests
 
 # ================================
 # IMPORT MOVED MODULES
 # ================================
 from app.parser.engine import parse_message
 from app.utils.time import today
+from app.services.telegram import send_message
 
 # ================================
 # INIT
@@ -51,6 +51,9 @@ def webhook():
 
     print("[RAW USER TEXT]", text)
 
+    # ================================
+    # GPT PARSER
+    # ================================
     try:
         parsed = parse_message(text)
     except Exception as e:
@@ -78,19 +81,6 @@ def webhook():
         send_message(chat_id, f"❌ Could not log entry.\n{e}")
 
     return "ok", 200
-
-
-# ================================
-# TG SEND MESSAGE
-# ================================
-def send_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print("[TG SEND ERROR]", e)
-        pass
 
 
 # ================================
