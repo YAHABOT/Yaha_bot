@@ -33,7 +33,7 @@ When you see that:
   - Known bugs
   - Latest build behavior
   - Next steps
-
+1.12 Dual Engine Architecture — Logging Engine + Advice Engine
 ---
 
 ### 1.2 How you should behave
