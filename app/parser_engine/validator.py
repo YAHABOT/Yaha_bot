@@ -1,123 +1,49 @@
-from __future__ import annotations
+import json
+import os
+from typing import Dict, Any, Tuple
 
-import re
-from typing import Dict, Any
+from jsonschema import validate, ValidationError
 
-from openai import OpenAI
-from .contract import ParserOutput
-from .parser_pack_v2 import load_parser_pack
+# Path: app/parser_engine/schemas/
+SCHEMA_DIR = os.path.join(
+    os.path.dirname(__file__),
+    "schemas"
+)
 
-
-client = OpenAI()
-
-
-# ---------------------------------------------------------------------------
-# RULE-BASED CLASSIFICATION LAYER
-# ---------------------------------------------------------------------------
-
-FOOD_KEYWORDS = [
-    "kcal", "calories", "protein", "carbs", "fat", "fiber",
-    "breakfast", "lunch", "dinner", "ate", "meal", "wrap", "oats",
-]
-
-SLEEP_KEYWORDS = [
-    "slept", "sleep", "hours", "bed", "wake", "woke", "energy score",
-    "sleep score", "nap",
-]
-
-EXERCISE_KEYWORDS = [
-    "run", "km", "pace", "workout", "gym", "training", "cardio",
-    "strength", "calories burned", "hr", "avg hr", "max hr",
-]
+# Mapping container → schema filename
+CONTAINER_SCHEMAS = {
+    "food": "food.json",
+    "sleep": "sleep.json",
+    "exercise": "exercise.json",
+    "unknown": "unknown.json",
+}
 
 
-def rule_based_guess(text: str) -> str:
-    """Fast, deterministic container detection using keywords."""
-    lower = text.lower()
+def load_schema(container: str) -> Dict[str, Any]:
+    """
+    Load JSON schema file for a given container.
+    """
+    filename = CONTAINER_SCHEMAS.get(container, "unknown.json")
+    path = os.path.join(SCHEMA_DIR, filename)
 
-    if any(k in lower for k in FOOD_KEYWORDS):
-        return "food"
-    if any(k in lower for k in SLEEP_KEYWORDS):
-        return "sleep"
-    if any(k in lower for k in EXERCISE_KEYWORDS):
-        return "exercise"
-
-    return "unknown"
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-# ---------------------------------------------------------------------------
-# GPT CLASSIFIER LAYER
-# ---------------------------------------------------------------------------
+def validate_container(container: str, data: Dict[str, Any]) -> Tuple[bool, str]:
+    """
+    Validate the data dict against the container's JSON schema.
 
-def gpt_classify(text: str) -> Dict[str, Any]:
-    """Send message to the Parser Pack v2."""
-    pack = load_parser_pack()
+    Returns:
+        (True, "") if valid
+        (False, "<error message>") if invalid
+    """
+    schema = load_schema(container)
 
-    response = client.responses.create(
-        model="gpt-4.1",
-        prompt={"id": pack["id"], "version": pack["version"]},
-        input=[{"role": "user", "content": text}],
-        max_output_tokens=512,
-    )
-
-    raw = response.output[0].content[0].text
-
-    import json
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        # Total fallback
-        return {
-            "container": "unknown",
-            "data": {"raw_text": text},
-            "confidence": 0.0,
-            "issues": ["Invalid JSON from GPT"],
-            "reply_text": "⚠️ I could not classify this.",
-        }
-
-
-# ---------------------------------------------------------------------------
-# MAIN ENTRYPOINT
-# ---------------------------------------------------------------------------
-
-def classify_message(text: str) -> ParserOutput:
-    """
-    Full classification pipeline:
-    1. Rule-based guess
-    2. Send to GPT Parser Pack
-    3. Shape into ParserOutput
-    """
-    if not text or not text.strip():
-        return ParserOutput.unknown(
-            raw_text=text,
-            reason="Empty or blank message",
-        )
-
-    # 1) Rule-based initial guess
-    guess = rule_based_guess(text)
-
-    # 2) GPT parser pack
-    gpt_raw = gpt_classify(text)
-
-    # 3) Try to merge rule-based + GPT
-    container = gpt_raw.get("container", guess) or guess
-    data = gpt_raw.get("data", {})
-    confidence = gpt_raw.get("confidence", 0.0)
-    issues = gpt_raw.get("issues", [])
-    reply_text = gpt_raw.get("reply_text", "Logged.")
-
-    # 4) Build structured output
-    output = ParserOutput(
-        container=container,
-        data=data,
-        confidence=confidence,
-        issues=issues,
-        reply_text=reply_text,
-    )
-
-    # If GPT gave unknown but rule-based was confident → override
-    if output.container == "unknown" and guess != "unknown":
-        output.container = guess
-        output.issues.append("Overrode GPT with rule-based classifier.")
-
-    return output
+        validate(instance=data, schema=schema)
+        return True, ""
+    except ValidationError as e:
+        return False, str(e)
+    except Exception as e:
+        return False, f"Schema load/validation error: {e}"
