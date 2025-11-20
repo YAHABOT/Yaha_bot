@@ -39,8 +39,26 @@ def webhook():
 
     print("[GPT JSON]", parsed)
 
-    container = parsed["container"]
-    final_data = parsed["data"]
+    container = parsed.get("container")
+    final_data = parsed.get("data", {})
+    reply_text = parsed.get("reply_text", "✅ Logged successfully.")
+
+    # ================================
+    # BASIC CONTAINER VALIDATION
+    # ================================
+    allowed_containers = {"food", "sleep", "exercise"}
+
+    if container not in allowed_containers:
+        print(f"[CONTAINER WARNING] Invalid or unknown container: {container}")
+        # Later we can log this to an `entries` table instead.
+        send_message(
+            chat_id,
+            "⚠️ I couldn’t classify that as food, sleep, or exercise,\n"
+            "so I didn’t log it. Try being a bit more specific.",
+        )
+        return "ok", 200
+
+    # Enrich data with metadata
     final_data["chat_id"] = chat_id
     final_data["date"] = date_val
 
@@ -57,6 +75,5 @@ def webhook():
         return "ok", 200
 
     # Success
-    send_message(chat_id, parsed["reply_text"])
+    send_message(chat_id, reply_text)
     return "ok", 200
-
