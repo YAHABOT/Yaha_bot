@@ -2,7 +2,7 @@ from flask import Blueprint, request
 from app.parser.engine import parse_message
 from app.utils.time import today
 from app.services.telegram import send_message
-from app.services.supabase import insert_record
+from app.services.supabase import insert_record, log_entry
 
 api = Blueprint("api", __name__)
 
@@ -28,12 +28,22 @@ def webhook():
     print("[RAW USER TEXT]", text)
 
     # ================================
-    # GPT PARSER
+    # GPT PARSING
     # ================================
     try:
         parsed = parse_message(text)
     except Exception as e:
         print("[GPT ERROR]", e)
+
+        # shadow-log parse errors
+        log_entry(
+            chat_id=chat_id,
+            raw_text=text,
+            parsed=None,
+            container=None,
+            error=f"parser_error: {str(e)}",
+        )
+
         send_message(chat_id, "⚠️ Sorry, I could not process that.")
         return "ok", 200
 
@@ -41,39 +51,58 @@ def webhook():
 
     container = parsed.get("container")
     final_data = parsed.get("data", {})
-    reply_text = parsed.get("reply_text", "✅ Logged successfully.")
+    reply_text = parsed.get("reply_text", "Logged.")
 
     # ================================
-    # BASIC CONTAINER VALIDATION
+    # UNKNOWN / INVALID CONTAINER
     # ================================
-    allowed_containers = {"food", "sleep", "exercise"}
+    allowed = {"food", "sleep", "exercise"}
 
-    if container not in allowed_containers:
+    if container not in allowed:
         print(f"[CONTAINER WARNING] Invalid or unknown container: {container}")
-        # Later we can log this to an `entries` table instead.
+
+        # shadow-log unknown container
+        log_entry(
+            chat_id=chat_id,
+            raw_text=text,
+            parsed=parsed,
+            container=container,
+            error="invalid_or_unknown_container",
+        )
+
         send_message(
             chat_id,
-            "⚠️ I couldn’t classify that as food, sleep, or exercise,\n"
-            "so I didn’t log it. Try being a bit more specific.",
+            "⚠️ I couldn’t classify that as food, sleep, or exercise.\n"
+            "Try being a bit more specific.",
         )
         return "ok", 200
 
-    # Enrich data with metadata
+    # fill metadata
     final_data["chat_id"] = chat_id
     final_data["date"] = date_val
 
     print(f"[FINAL DATA → {container}]", final_data)
 
     # ================================
-    # SUPABASE INSERT (through service)
+    # MAIN SUPABASE INSERT
     # ================================
     response, error = insert_record(container, final_data)
 
     if error:
         print(f"[SUPABASE ERROR {container}]", error)
+
+        # shadow-log failed inserts
+        log_entry(
+            chat_id=chat_id,
+            raw_text=text,
+            parsed=parsed,
+            container=container,
+            error=f"supabase_insert_failed: {error}",
+        )
+
         send_message(chat_id, f"❌ Could not log entry.\n{error}")
         return "ok", 200
 
-    # Success
+    # success
     send_message(chat_id, reply_text)
     return "ok", 200
