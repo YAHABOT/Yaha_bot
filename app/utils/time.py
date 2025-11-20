@@ -9,4 +9,3 @@ def today():
     This matches the previous behavior in main.py.
     """
     return datetime.now(UTC).strftime("%Y-%m-%d")
-
