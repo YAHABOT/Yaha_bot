@@ -104,4 +104,20 @@ def classify_message(text: str) -> ParserOutput:
     data = gpt_raw.get("data", {})
     confidence = gpt_raw.get("confidence", 0.0)
     issues = gpt_raw.get("issues", [])
-    reply_text = gpt_raw.get("reply_text",_
+    reply_text = gpt_raw.get("reply_text", "Logged.")
+
+    # 4) Build structured output
+    output = ParserOutput(
+        container=container,
+        data=data,
+        confidence=confidence,
+        issues=issues,
+        reply_text=reply_text,
+    )
+
+    # If GPT gave unknown but rule-based was confident → override
+    if output.container == "unknown" and guess != "unknown":
+        output.container = guess
+        output.issues.append("Overrode GPT with rule-based classifier.")
+
+    return output
