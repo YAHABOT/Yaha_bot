@@ -68,23 +68,27 @@ Transform the backend from a single-file fragile structure into a clean, stable,
 
 ---
 
-## 🧠 STEP 2 — PARSER ENGINE (Locked until Step 1 completes)
+🧠 STEP 2 — PARSER ENGINE (Completed + Locked)
 
-### Goal:
-Make the GPT parser deterministic, schema-safe, and version-controlled.
+Goal:
+Make the GPT parser deterministic, schema-safe, and fully version-controlled.
 
-### Definition of DONE:
-- Parser returns deterministic JSON
-- No fallback to list/text mode
-- Strict container schemas enforced
-- Versioned parser logic (Parser Packs)
-- Classification rules validated
-- Error recovery built-in
-- Integration-tested with Supabase inserts
+Definition of DONE:
+• Parser returns deterministic JSON (no markdown, no partial objects)  
+• No fallback to list/text mode  
+• Strict container schemas enforced (food, sleep, exercise, unknown)  
+• Versioned parser logic (Parser Pack v2)  
+• Classification rules validated  
+• Confidence scoring added  
+• Issues array always returned  
+• Error-safe behavior for ambiguous input  
+• Integration-tested with Supabase inserts  
+• Unknown container routed to public.entries  
+• Full pipeline operational in production
 
-### Status:
-🔄 In Progress  
-(Do not proceed to Step 3 until operator confirms Step 2 is LOCKED.)
+Status:
+✔ Completed  
+🔒 Locked
 
 ---
 
