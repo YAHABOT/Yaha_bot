@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SleepContainer",
+  "type": "object",
+  "properties": {
+    "sleep_time":   { "type": ["string", "null"] },
+    "wake_time":    { "type": ["string", "null"] },
+    "hours":        { "type": ["number", "null"] },
+    "sleep_score":  { "type": ["number", "null"] },
+    "notes":        { "type": ["string", "null"] }
+  },
+  "required": []
+}
