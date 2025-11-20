@@ -977,6 +977,35 @@ Parser Engine v2 introduces deterministic JSON parsing, strict schema validation
 ✔ Safe, stable, reproducible  
 🔒 Module locked — move to Telegram UX
 
+### [2025-11-20] — Build 015 — Telegram UX Engine v1
+
+- One-line summary:
+  Added the first version of YAHA’s Telegram UX engine, enabling structured confirmations, inline buttons, callback handling, and user guidance flows.
+
+- Problem we were solving:
+  The bot relied purely on text replies and had no guided paths, no inline actions, and no structured confirmations. Users had no help when logs were malformed or unknown.
+
+- What changed:
+  - Created `app/telegram/ux.py` as the central UX engine.
+  - Added container-aware confirmation cards for food, sleep, and exercise.
+  - Implemented inline buttons for unknown classifications ("Log food", "Log sleep", "Log exercise").
+  - Added callback query handler for Telegram button presses.
+  - Updated `webhook.py` to route all text and callback flows through the new UX layer.
+  - Updated `telegram.py` service to support inline keyboards and callback acknowledgements.
+  - Unknown logs now trigger structured guidance with suggested formats.
+  - Domain logs still insert properly into Supabase.
+  - `entries` table continues to record unknown/error cases cleanly.
+
+- How it was tested:
+  • Sent plain text (“hello”) → Unknown flow + inline buttons.  
+  • Sent food log → Structured food confirmation + insert into `public.food`.  
+  • Sent sleep log → Structured sleep confirmation + insert into `public.sleep`.  
+  • Verified callback handlers respond instantly and guide the user into clean logging patterns.  
+
+- Status:
+  ✔ Stable (v1)  
+  🔜 Ready for Step 3.2: Multi-step flows (premium UX)
+
 ---
 
 
