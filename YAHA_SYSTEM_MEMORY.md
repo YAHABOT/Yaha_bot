@@ -1006,6 +1006,55 @@ Parser Engine v2 introduces deterministic JSON parsing, strict schema validation
   ✔ Stable (v1)  
   🔜 Ready for Step 3.2: Multi-step flows (premium UX)
 
+
+### [2025-11-20] — Build 0XX — UX Preview Foundation + Parser v2 + Inline Button Failure + TG Menu Direction
+
+- One-line Summary:
+  Implemented preview-card foundation and parser v2, identified the missing callback subsystem, and locked the decision to replace /commands with a persistent Telegram menu button.
+
+- What we accomplished:
+  • Parser v2 fully rebuilt with deterministic JSON contract.
+  • Strict schemas for food/sleep/exercise/unknown implemented.
+  • meal_type extraction rules added and stabilized.
+  • Added missing Supabase column (meal_type).
+  • Free-form logging behaves correctly (instant log, no preview).
+  • First version of structured food preview created with inline buttons
+    (Confirm / Edit / Cancel).
+  • Inline buttons display correctly inside Telegram.
+
+- What failed / requires follow-up:
+  • Confirm/Edit/Cancel buttons do NOT work yet because:
+      - /webhook does not handle `callback_query`.
+      - No preview queue exists to store pending structured logs.
+      - No finalize handler exists to turn a preview into a DB insert.
+      - No edit/cancel routing implemented.
+  • Result: preview displays but all buttons are non-functional.
+  • This is intentional, expected, and the next module to build.
+
+- New UX Decisions (Locked):
+  • YAHA will NOT use /food, /sleep, /exercise commands.
+  • YAHA will use a **persistent Telegram menu button** instead.
+      - Menu options will include:
+          1. Log Food
+          2. Log Sleep
+          3. Log Exercise
+          4. View Today
+          5. View Last Logs
+          6. Dashboard (webapp)
+          7. Help
+  • Structured multi-step flows (with previews) are only triggered from menu.
+  • Free-form text ALWAYS logs instantly (no preview).
+
+- Impact:
+  • Core parsing + instant logging stable.
+  • Preview UX foundation is built, but blocked until callback system is added.
+  • TG menu will replace all slash commands and become the primary navigation.
+
+- Status:
+  ⚠️ Partial — preview UI exists, callback engine missing.
+  🟢 Direction locked for Step 3 UX.
+  🔜 Next step: Implement callback_query routing + preview queue.
+
 ---
 
 
