@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FoodContainer",
+  "type": "object",
+  "properties": {
+    "meal_name": { "type": ["string", "null"] },
+    "calories":   { "type": ["number", "null"] },
+    "protein_g":  { "type": ["number", "null"] },
+    "carbs_g":    { "type": ["number", "null"] },
+    "fat_g":      { "type": ["number", "null"] },
+    "fiber_g":    { "type": ["number", "null"] },
+    "notes":      { "type": ["string", "null"] }
+  },
+  "required": []
+}
