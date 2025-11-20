@@ -836,6 +836,26 @@ date = 2025-11-19
 
 Build 011 marked as stable.
 
+12. CHANGELOG — Build 012 (20/11/2025)
+Status: Completed
+Summary: Core Architecture Refactor — Legacy Module Isolation + API Bootstrap Integration
+
+12.1 Overview
+This build isolates all legacy ingestion modules, introduces the new API blueprint architecture, and prepares the system for the upcoming unified “Container Engine v2.” The refactor was designed to remove cross-module coupling, eliminate import ambiguity, and create a scalable foundation for future ingestion, classification, and validation pipelines.
+
+12.2 Folder Refactor: Legacy Isolation
+The previous folder layout contained legacy ingestion code inside `app/clients` and `app/processors`, which mixed transport responsibilities (Telegram handler) with parsing and transformation logic.  
+To prevent conflicts with the new modular parser and blueprint system, both folders were migrated to legacy holding zones.
+
+Changes:
+• `app/clients` → `app/clients_legacy`
+• `app/processors` → `app/processors_legacy`
+
+Rationale:
+• Eliminates namespace collisions during parser engine expansion.
+• Removes ambiguity for future imports (especially for GPT-driven ingestion).
+• Maintains backward
+
 
 ---
 
