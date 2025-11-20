@@ -1,5 +1,6 @@
 from flask import Blueprint, request
-from app.parser.engine import parse_message
+
+from app.parser_engine.router import parse_text_message
 from app.utils.time import today
 from app.services.telegram import send_message
 from app.services.supabase import insert_record, log_entry
@@ -28,12 +29,12 @@ def webhook():
     print("[RAW USER TEXT]", text)
 
     # ================================
-    # GPT PARSING
+    # PARSER ENGINE v2
     # ================================
     try:
-        parsed = parse_message(text)
+        parsed = parse_text_message(text)
     except Exception as e:
-        print("[GPT ERROR]", e)
+        print("[PARSER ENGINE ERROR]", e)
 
         # shadow-log parse errors
         log_entry(
@@ -41,16 +42,16 @@ def webhook():
             raw_text=text,
             parsed=None,
             container=None,
-            error=f"parser_error: {str(e)}",
+            error=f"parser_engine_error: {str(e)}",
         )
 
         send_message(chat_id, "⚠️ Sorry, I could not process that.")
         return "ok", 200
 
-    print("[GPT JSON]", parsed)
+    print("[PARSER OUTPUT]", parsed)
 
     container = parsed.get("container")
-    final_data = parsed.get("data", {})
+    final_data = parsed.get("data", {}) or {}
     reply_text = parsed.get("reply_text", "Logged.")
 
     # ================================
