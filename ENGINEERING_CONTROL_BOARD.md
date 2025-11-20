@@ -149,6 +149,25 @@ Notes:
 - Unknown messages show structured guidance + inline “Log food / sleep / exercise” buttons.
 - Valid containers (food, sleep, exercise) get structured confirmation messages while continuing to write directly to Supabase tables.
 - Callback query handling added so inline buttons feel native.
+— Premium UX Definition (Locked)
+
+YAHA uses dual engines:
+
+1) Logging Engine:
+- All multi-step flows use local state + regex parsing.
+- 0 GPT calls during the form.
+- 1 GPT call only on confirm → shape → validate → final JSON.
+- Static UX for speed and cost control.
+- Obvious macros parsed locally (regex).
+- Database writes done locally.
+
+2) Advice Engine:
+- Triggered only when user explicitly asks questions: “compare”, “advise”, “is this healthy”, “how much should I eat”.
+- GPT used for reasoning + guidance.
+- No DB writes, only reading.
+- Structured output based on user’s logged data.
+
+This architecture minimizes GPT spend while maximizing smart features.
 
 
 
