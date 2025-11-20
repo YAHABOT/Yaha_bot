@@ -854,7 +854,65 @@ Changes:
 Rationale:
 • Eliminates namespace collisions during parser engine expansion.
 • Removes ambiguity for future imports (especially for GPT-driven ingestion).
-• Maintains backward
+• Maintains backward compatibility by retaining legacy files without executing them.
+
+Impact:
+• No runtime imports depend on these folders anymore.
+• No breaking changes to current ingestion behavior since legacy modules were already inactive.
+
+12.3 API Bootstrap Integration
+The new architecture introduces a clear separation of concerns via Flask Blueprints.
+
+Added:
+• `app/api/` directory
+• `app/api/webhook.py` (blueprint-based Telegram webhook)
+
+Blueprint Purpose:
+• Encapsulates routing logic separate from application root.
+• Ensures route handlers remain fully decoupled from ingestion and parsing engines.
+• Enables future expansion (multiple endpoints: voice_ingest, screenshot_ingest, admin_ping, healthcheck, container_sync).
+
+12.4 Parser Engine Routing (Engine v1 Bridge)
+The `parser/engine.py` now acts as the central router between:
+• raw Telegram input  
+• GPT classification output  
+• Supabase persistence  
+
+This aligns with the planned “Container Engine v2” where:
+• ingestion → classification → shape → validation → dispatch → persistence  
+becomes a strict pipeline.
+
+12.5 Import Health & Runtime Safety
+After the refactor, all imports were validated to ensure no broken paths remain.
+
+Confirmed:
+• `main.py` imports only `from app.api.webhook import api` (correct)
+• `parser.engine` remains intact and operational
+• Supabase client initialization unaffected
+• No circular imports introduced
+• No reference exists to `clients` or `processors` after migration
+
+Runtime Behavior:
+• Application boots without error.
+• Telegram webhook responds correctly.
+• Unknown messages correctly fall back to the "unknown" classification path.
+
+12.6 Deployment Impact
+Deployment confirmed via Render logs:
+• App runs with blueprint correctly registered.
+• No import errors.
+• Legacy folders ignored as intended.
+
+This build produces a stable surface for Step 7 (Container Engine v2 introduction).
+
+12.7 Next Required Engineering Steps
+• Replace legacy ingestion routines with the new modular parser pipeline.
+• Move Supabase logic to `services/supabase.py` and centralize DB IO.
+• Introduce unified validation layer for GPT output.
+• Expand blueprint to handle multi-modal ingest (voice, screenshot, text).
+• Introduce request ID tracing for debugging pipeline execution.
+
+End of Build 012.
 
 
 ---
