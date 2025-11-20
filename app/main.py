@@ -35,6 +35,7 @@ UTC = pytz.UTC
 def home():
     return "YAHA bot running"
 
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
@@ -76,4 +77,24 @@ def webhook():
         print(f"[SUPABASE ERROR {container}]", e)
         send_message(chat_id, f"❌ Could not log entry.\n{e}")
 
-    return
+    return "ok", 200
+
+
+# ================================
+# TG SEND MESSAGE
+# ================================
+def send_message(chat_id, text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print("[TG SEND ERROR]", e)
+        pass
+
+
+# ================================
+# START
+# ================================
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
