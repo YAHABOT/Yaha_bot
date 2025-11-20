@@ -914,6 +914,36 @@ This build produces a stable surface for Step 7 (Container Engine v2 introductio
 
 End of Build 012.
 
+### [2025-11-20] — Build 013 — Container Engine v2 Initialization (Structural Refactor)
+
+**Summary:**  
+Major architectural restructuring to prepare the system for multi-modal ingestion (text, photos, voice) and future Container Engine v2. Introduced modular folder structure, blueprint routing, service layer abstraction, and global shadow-logging.
+
+**Problem Being Solved:**  
+The previous monolithic `main.py` made the system fragile and unable to scale to image and audio ingestion. No separation of concerns between parser logic, Telegram logic, Supabase logic, and routing. No reliable logging mechanism for future AI training or debugging.
+
+**What Changed:**  
+- Added `app/api/` with Blueprint routing (`webhook.py`)  
+- Added `app/services/` for all Supabase + Telegram operations  
+- Added `app/parser/` for GPT parsing engine (modular)  
+- Added `app/utils/time.py` for clean date handling  
+- Implemented shadow-logging into `public.entries`  
+- Refactored ingestion flow to route through isolated modules  
+- Removed legacy monolithic code structure  
+- Added future-proof hooks for Router, OCR, and ASR modules  
+- Unified logging across all modules for debugging consistency  
+
+**How It Was Tested:**  
+- Sent unknown message (“blim blim”) → classified as unknown  
+- Shadow-log successfully inserted into `public.entries` with all fields  
+- Realtime subscription showed correct payload in Supabase UI  
+- Sent valid food log → correct routing to `public.food`  
+- System stable (200 OK responses, no crashes, no PGRST errors)  
+
+**Status:**  
+✅ Stable — Architecture foundation complete and production-ready  
+
+
 
 ---
 
