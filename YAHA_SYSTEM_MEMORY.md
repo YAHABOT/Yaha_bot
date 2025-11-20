@@ -944,6 +944,38 @@ The previous monolithic `main.py` made the system fragile and unable to scale to
 ✅ Stable — Architecture foundation complete and production-ready  
 
 
+## 🔄 CHANGELOG 14 — Parser Engine v2 Deployment (20/11/2025)
+
+### Summary
+A full rebuild of the YAHA parsing system.  
+Parser Engine v2 introduces deterministic JSON parsing, strict schema validation, version-controlled rulesets, and a new modular routing pipeline. The bot now reliably classifies food, sleep, exercise, and unknown messages with zero hallucination.
+
+### Key Changes
+- Implemented Parser Pack v2 (classifier + shaper)  
+- Added strict JSON schema enforcement for all containers  
+- Integrated jsonschema validation layer  
+- Introduced confidence scoring and issue reporting  
+- Created container router module  
+- Added Unknown Container handling with insertion into `public.entries`  
+- Updated webhook pipeline to use modular parser engine  
+- Ensured deterministic OpenAI responses (no markdown, no variation)  
+- Added Supabase logging for parsed objects, confidence levels, and errors  
+- Validated food and sleep workflows end-to-end in production  
+- Preserved safety rules: never guess, always return all 5 keys
+
+### Deployment Notes
+- Required new Python dependency: `jsonschema`  
+- Render deployment passed after installing module  
+- All containers tested:  
+  • FOOD → success  
+  • SLEEP → success  
+  • UNKNOWN → correct routing  
+  • EXERCISE → ready for next schema pass
+
+### Status
+✔ Parser Engine v2 is live  
+✔ Safe, stable, reproducible  
+🔒 Module locked — move to Telegram UX
 
 ---
 
