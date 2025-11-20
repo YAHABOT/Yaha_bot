@@ -139,8 +139,17 @@ Transform the bot from a text-only logger into a multimedia ingestion interface 
 
 ---
 
-### Status:
-🔒 Locked until Step 2 (Parser Engine) is completed.
+Status:
+
+- In Progress
+
+Notes:
+- Telegram UX engine module created (`app/telegram/ux.py`).
+- Webhook now routes all text messages through the UX engine.
+- Unknown messages show structured guidance + inline “Log food / sleep / exercise” buttons.
+- Valid containers (food, sleep, exercise) get structured confirmation messages while continuing to write directly to Supabase tables.
+- Callback query handling added so inline buttons feel native.
+
 
 
 ---
