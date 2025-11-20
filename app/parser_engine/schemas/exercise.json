@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExerciseContainer",
+  "type": "object",
+  "properties": {
+    "type":   { "type": ["string", "null"] },
+    "duration_min": { "type": ["number", "null"] },
+    "calories": { "type": ["number", "null"] },
+    "intensity": { "type": ["string", "null"] },
+    "notes": { "type": ["string", "null"] }
+  },
+  "required": []
+}
