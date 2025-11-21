@@ -9,6 +9,26 @@ ReplyTuple = Tuple[str, Optional[Dict[str, Any]]]
 VALID_CONTAINERS = {"food", "sleep", "exercise"}
 
 
+def build_main_menu() -> ReplyTuple:
+    """
+    Build the main menu with 4 buttons.
+    """
+    text = "Okay, what would you like to log?"
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "🥗 Log Food", "callback_data": "log_food"},
+                {"text": "😴 Log Sleep", "callback_data": "log_sleep"},
+            ],
+            [
+                {"text": "🏋🏻 Log Exercise", "callback_data": "log_exercise"},
+                {"text": "📋 View Day", "callback_data": "view_day"},
+            ],
+        ]
+    }
+    return text, reply_markup
+
+
 def _safe(value: Any, default: str = "—") -> str:
     if value is None:
         return default

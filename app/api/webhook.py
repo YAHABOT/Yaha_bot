@@ -8,13 +8,14 @@ from typing import Any, Dict
 from flask import Blueprint, jsonify, request
 
 from app.parser_engine.router import parse_text_message
-from app.services.telegram import send_message, answer_callback_query
+from app.services.telegram import send_message
 from app.services.supabase import insert_record, log_entry
-from app.telegram import build_reply_for_parsed, build_callback_reply
+from app.telegram import build_reply_for_parsed
 from app.telegram.state import get_state, set_state, clear_state
+from app.telegram.callbacks import handle_callback
+from app.telegram.ux import build_main_menu
 from app.telegram.flows.food_flow import (
     start_food_flow,
-    handle_food_callback,
     handle_food_text,
 )
 
@@ -37,8 +38,9 @@ def webhook() -> Any:
     update: Dict[str, Any] = request.get_json(silent=True) or {}
 
     # --- CALLBACK QUERIES (inline buttons) ----------------------------------
+    # --- CALLBACK QUERIES (inline buttons) ----------------------------------
     if "callback_query" in update:
-        _handle_callback_query(update["callback_query"])
+        handle_callback(update["callback_query"])
         return jsonify({"ok": True})
 
     # --- TEXT MESSAGES ------------------------------------------------------
@@ -70,6 +72,11 @@ def webhook() -> Any:
 
     # No active flow: commands / shortcuts first
     lower = raw_text.lower()
+    if lower == "menu":
+        text, reply_markup = build_main_menu()
+        send_message(chat_id, text, reply_markup=reply_markup)
+        return jsonify({"ok": True})
+
     if lower in ("/food", "log food", "add food", "log meal"):
         reply_text, reply_markup, new_state = start_food_flow(chat_id)
         set_state(chat_id, new_state)
@@ -134,84 +141,4 @@ def webhook() -> Any:
     return jsonify({"ok": True})
 
 
-def _handle_callback_query(callback: Dict[str, Any]) -> None:
-    """
-    Handle inline keyboard presses:
-    - Food flow callbacks
-    - Generic 'start_*' callbacks (guidance)
-    """
-    callback_id = callback.get("id")
-    message = callback.get("message") or {}
-    chat = message.get("chat") or {}
-    chat_id = chat.get("id")
-    data = callback.get("data", "")
 
-    if not callback_id or not chat_id:
-        return
-
-    # 1) If food flow is active OR this callback starts it, handle via food flow
-    state = get_state(chat_id)
-
-    # Start food flow explicitly from inline button (e.g. from unknown message guidance)
-    if data in ("start_food", "food_start"):
-        reply_text, reply_markup, new_state = start_food_flow(chat_id)
-        set_state(chat_id, new_state)
-        send_message(chat_id, reply_text, reply_markup=reply_markup)
-        answer_callback_query(callback_id)
-        return
-
-    # If we are already in a food flow, route callback there
-    if state and state.get("flow") == "food" and data.startswith("food_"):
-        reply_text, reply_markup, new_state = handle_food_callback(chat_id, data, state)
-
-        # Special case: confirmation step triggers DB write
-        if state.get("step") == "preview" and data == "food_confirm":
-            # We expect new_state to still contain the final data
-            final_state = new_state or state
-            food_data = final_state.get("data") or {}
-
-            # Prepare final record for Supabase
-            record = dict(food_data)
-            record["chat_id"] = str(chat_id)
-            record["date"] = _today_utc_iso()
-
-            success, error = insert_record("food", record)
-            if not success:
-                logging.error("[SUPABASE ERROR food] %s", error)
-                send_message(chat_id, f"❌ Could not log your meal.\n{error}")
-                log_entry(
-                    chat_id=str(chat_id),
-                    raw_text=food_data.get("meal_name") or "",
-                    parsed=food_data,
-                    container="food",
-                    error=str(error),
-                )
-                clear_state(chat_id)
-                answer_callback_query(callback_id)
-                return
-
-            # Successful write: clear state and confirm
-            clear_state(chat_id)
-            send_message(chat_id, "✅ Meal logged successfully.")
-            answer_callback_query(callback_id)
-            return
-
-        # Regular branch (non-confirm)
-        if new_state is None:
-            clear_state(chat_id)
-        else:
-            set_state(chat_id, new_state)
-
-        send_message(chat_id, reply_text, reply_markup=reply_markup)
-        answer_callback_query(callback_id)
-        return
-
-    # 2) Fallback: generic UX callbacks (legacy guidance)
-    reply = build_callback_reply(data)
-    if reply is None:
-        answer_callback_query(callback_id)
-        return
-
-    text, reply_markup = reply
-    send_message(chat_id, text, reply_markup=reply_markup)
-    answer_callback_query(callback_id)
