@@ -168,6 +168,8 @@ YAHA uses dual engines:
 - Structured output based on user’s logged data.
 
 This architecture minimizes GPT spend while maximizing smart features.
+• Build 016 completed the callback router, main menu, and initial guided stubs for Sleep and Exercise. Next required sub-step: 3C.2 — Media Ingestion (OCR/ASR parsing layer).
+
 
 
 
