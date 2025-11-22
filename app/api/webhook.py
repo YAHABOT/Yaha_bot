@@ -43,15 +43,18 @@ def healthcheck() -> str:
 def webhook() -> Any:
     update: Dict[str, Any] = request.get_json(silent=True) or {}
 
-    # --- CALLBACK QUERIES (inline buttons) ----------------------------------
+    # ----------------------------------------------------------------------
+    # CALLBACK QUERIES (inline buttons)
+    # ----------------------------------------------------------------------
     if "callback_query" in update:
         handle_callback(update["callback_query"])
         return jsonify({"ok": True})
 
-    # --- TEXT MESSAGES ------------------------------------------------------
+    # ----------------------------------------------------------------------
+    # TEXT MESSAGES
+    # ----------------------------------------------------------------------
     message = update.get("message")
     if not message or "text" not in message:
-        # For now, ignore non-text updates in this step
         return jsonify({"ok": True})
 
     chat = message.get("chat") or {}
@@ -61,12 +64,13 @@ def webhook() -> Any:
     if not chat_id or not raw_text:
         return jsonify({"ok": True})
 
-    # Check if this chat is in a multi-step flow
+    # ----------------------------------------------------------------------
+    # ACTIVE MULTI-STEP FLOWS
+    # ----------------------------------------------------------------------
     state = get_state(chat_id)
 
-    # Food flow (existing)
+    # FOOD FLOW (existing)
     if state and state.get("flow") == "food":
-        # Route text into food flow handler, no GPT usage
         reply_text, reply_markup, new_state = handle_food_text(chat_id, raw_text, state)
 
         if new_state is None:
@@ -77,7 +81,7 @@ def webhook() -> Any:
         send_message(chat_id, reply_text, reply_markup=reply_markup)
         return jsonify({"ok": True})
 
-    # Sleep flow (new guided flow)
+    # SLEEP FLOW (guided, Build 017)
     if state and state.get("flow") == "sleep":
         reply_text, reply_markup, new_state = handle_sleep_text(chat_id, raw_text, state)
 
@@ -89,7 +93,7 @@ def webhook() -> Any:
         send_message(chat_id, reply_text, reply_markup=reply_markup)
         return jsonify({"ok": True})
 
-    # Exercise flow (new guided flow)
+    # EXERCISE FLOW (guided, Build 017)
     if state and state.get("flow") == "exercise":
         reply_text, reply_markup, new_state = handle_exercise_text(chat_id, raw_text, state)
 
@@ -101,8 +105,11 @@ def webhook() -> Any:
         send_message(chat_id, reply_text, reply_markup=reply_markup)
         return jsonify({"ok": True})
 
-    # No active flow: commands / shortcuts first
+    # ----------------------------------------------------------------------
+    # SHORTCUT COMMANDS
+    # ----------------------------------------------------------------------
     lower = raw_text.lower()
+
     if lower == "menu":
         text, reply_markup = build_main_menu()
         send_message(chat_id, text, reply_markup=reply_markup)
@@ -114,13 +121,15 @@ def webhook() -> Any:
         send_message(chat_id, reply_text, reply_markup=reply_markup)
         return jsonify({"ok": True})
 
-    # Otherwise, default to Parser Engine v2 (GPT + schemas)
+    # ----------------------------------------------------------------------
+    # PARSER ENGINE (GPT + Schemas)
+    # ----------------------------------------------------------------------
     try:
         parsed = parse_text_message(raw_text)
-    except Exception as e:  # hard fail from parser
+    except Exception as e:
         logging.exception("[PARSER ERROR] %s", e)
         send_message(chat_id, "❌ I hit an internal error while parsing that. Try again.")
-        # Log into entries as a hard error
+
         log_entry(
             chat_id=str(chat_id),
             raw_text=raw_text,
@@ -133,10 +142,10 @@ def webhook() -> Any:
     container = parsed.get("container", "unknown")
     data = parsed.get("data") or {}
 
-    # Build UX reply (pretty message + optional keyboard)
+    # Build UX reply (text + optional inline keyboard)
     reply_text, reply_markup = build_reply_for_parsed(raw_text, parsed)
 
-    # Unknown / invalid containers → do NOT write to domain tables
+    # Unknown container → DO NOT WRITE TO ANY TABLE
     if container not in VALID_CONTAINERS:
         log_entry(
             chat_id=str(chat_id),
@@ -148,7 +157,9 @@ def webhook() -> Any:
         send_message(chat_id, reply_text, reply_markup=reply_markup)
         return jsonify({"ok": True})
 
-    # Valid container → write to Supabase table
+    # ----------------------------------------------------------------------
+    # VALID CONTAINER → WRITE TO SUPABASE
+    # ----------------------------------------------------------------------
     final_data = dict(data)
     final_data["chat_id"] = str(chat_id)
     final_data["date"] = _today_utc_iso()
@@ -158,6 +169,7 @@ def webhook() -> Any:
     if not success:
         logging.error("[SUPABASE ERROR %s] %s", container, error)
         send_message(chat_id, f"❌ Could not log entry.\n{error}")
+
         log_entry(
             chat_id=str(chat_id),
             raw_text=raw_text,
@@ -167,6 +179,5 @@ def webhook() -> Any:
         )
         return jsonify({"ok": False})
 
-    # Successful write
     send_message(chat_id, reply_text, reply_markup=reply_markup)
-    return jsonify({"ok": True}")
+    return jsonify({"ok": True})
