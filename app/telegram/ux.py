@@ -138,10 +138,10 @@ def build_reply_for_parsed(raw_text: str, parsed: ContainerDict) -> ReplyTuple:
             lines.append(f"• Duration: {duration} h")
 
         if sleep_score is not None:
-            lines.append(f"• Sleep score: {sleep_score}")
+            lines.append(f"• Sleep score: {sleep_score}/100")
 
         if energy_score is not None:
-            lines.append(f"• Energy score: {energy_score}")
+            lines.append(f"• Energy score: {energy_score}/100")
 
         if sleep_start or sleep_end:
             start_txt = _safe(sleep_start)
