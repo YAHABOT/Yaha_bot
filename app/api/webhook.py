@@ -18,6 +18,12 @@ from app.telegram.flows.food_flow import (
     start_food_flow,
     handle_food_text,
 )
+from app.telegram.flows.sleep_flow import (
+    handle_sleep_text,
+)
+from app.telegram.flows.exercise_flow import (
+    handle_exercise_text,
+)
 
 api = Blueprint("api", __name__)
 
@@ -38,7 +44,6 @@ def webhook() -> Any:
     update: Dict[str, Any] = request.get_json(silent=True) or {}
 
     # --- CALLBACK QUERIES (inline buttons) ----------------------------------
-    # --- CALLBACK QUERIES (inline buttons) ----------------------------------
     if "callback_query" in update:
         handle_callback(update["callback_query"])
         return jsonify({"ok": True})
@@ -58,9 +63,35 @@ def webhook() -> Any:
 
     # Check if this chat is in a multi-step flow
     state = get_state(chat_id)
+
+    # Food flow (existing)
     if state and state.get("flow") == "food":
         # Route text into food flow handler, no GPT usage
         reply_text, reply_markup, new_state = handle_food_text(chat_id, raw_text, state)
+
+        if new_state is None:
+            clear_state(chat_id)
+        else:
+            set_state(chat_id, new_state)
+
+        send_message(chat_id, reply_text, reply_markup=reply_markup)
+        return jsonify({"ok": True})
+
+    # Sleep flow (new guided flow)
+    if state and state.get("flow") == "sleep":
+        reply_text, reply_markup, new_state = handle_sleep_text(chat_id, raw_text, state)
+
+        if new_state is None:
+            clear_state(chat_id)
+        else:
+            set_state(chat_id, new_state)
+
+        send_message(chat_id, reply_text, reply_markup=reply_markup)
+        return jsonify({"ok": True})
+
+    # Exercise flow (new guided flow)
+    if state and state.get("flow") == "exercise":
+        reply_text, reply_markup, new_state = handle_exercise_text(chat_id, raw_text, state)
 
         if new_state is None:
             clear_state(chat_id)
@@ -138,7 +169,4 @@ def webhook() -> Any:
 
     # Successful write
     send_message(chat_id, reply_text, reply_markup=reply_markup)
-    return jsonify({"ok": True})
-
-
-
+    return jsonify({"ok": True}")
