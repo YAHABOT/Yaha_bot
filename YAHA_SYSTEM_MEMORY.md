@@ -1110,6 +1110,49 @@ Changes:
 
 Status: In Progress (foundation complete; media fallback begins next build)
 
+v0.18 — GPT Fallback Engine (Implemented, Untested) — 2025-11-22
+Added
+
+gpt_fallback.py normalization engine
+
+GPT fallback for ambiguous or non-numeric input
+
+Flexible time parsing (11pm, midnight, 6ish, 07:30)
+
+Flexible duration parsing (80 mins, 1.5 hours, “slept around 7”)
+
+Macro normalization for food entries
+
+Unified detection of skip/no/pass phrases
+
+Changed
+
+Removed button-based sleep/energy scoring
+
+Removed perceived_intensity + effort_description in exercise
+
+Sleep & exercise time fields now accept raw text → normalized
+
+Improved state handling for preview screens
+
+webhook.py routing simplified
+
+Removed
+
+Hard-coded scoring buckets
+
+Old time parsing fallback attempts
+
+Blocked “non-number” error paths
+
+Redundant intensity fields in exercise model
+
+Status
+
+🚧 Build 018 is implemented but not yet tested.
+No validation done.
+Next step: manual functional tests inside Telegram.
+
 ---
 
 
