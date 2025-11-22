@@ -1,21 +1,19 @@
-# app/telegram/flows/food_flow.py
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple, Optional
+from typing import Any, Dict, Optional, Tuple
 
+from app.gpt_fallback import normalize_input
 
 FoodState = Dict[str, Any]
 Reply = Tuple[str, Optional[Dict[str, Any]], Optional[FoodState]]
 
 
 def _base_state() -> FoodState:
-    """
-    Initial state for the food flow.
-    """
     return {
         "flow": "food",
         "step": "choose_meal_type",
         "data": {
+            "meal_type": None,
             "meal_name": None,
             "calories": None,
             "protein_g": None,
@@ -28,16 +26,8 @@ def _base_state() -> FoodState:
 
 
 def start_food_flow(chat_id: int | str) -> Reply:
-    """
-    Entry point: user tapped 'Log food' or used /food.
-    """
     state = _base_state()
-
-    text = (
-        "🍽 Let’s log a meal.\n\n"
-        "First, what kind of meal is this?"
-    )
-
+    text = "🍽 Let’s log a meal.\n\nFirst, what kind of meal is this?"
     reply_markup = {
         "inline_keyboard": [
             [
@@ -48,252 +38,200 @@ def start_food_flow(chat_id: int | str) -> Reply:
                 {"text": "Dinner", "callback_data": "food_mealtype_dinner"},
                 {"text": "Snack", "callback_data": "food_mealtype_snack"},
             ],
-            [
-                {"text": "Cancel ❌", "callback_data": "food_cancel"},
-            ],
+            [{"text": "Cancel ❌", "callback_data": "food_cancel"}],
         ]
     }
-
     return text, reply_markup, state
 
 
-def handle_food_callback(
-    chat_id: int | str,
-    callback_data: str,
-    state: FoodState,
-) -> Reply:
-    """
-    Handle inline button presses while in the food flow.
-    """
+def handle_food_callback(chat_id: int | str, callback_data: str, state: FoodState) -> Reply:
     step = state.get("step")
     data = state.get("data") or {}
 
-    # Cancel at any time
     if callback_data == "food_cancel":
-        text = "Okay, cancelled the food log."
-        return text, None, None  # state cleared
+        return "Okay, cancelled the food log.", None, None
 
-    # Step: choose meal type
     if step == "choose_meal_type" and callback_data.startswith("food_mealtype_"):
         meal_type = callback_data.removeprefix("food_mealtype_")
-        data["meal_type"] = meal_type  # not stored in DB yet, but useful later
+        data["meal_type"] = meal_type
         state["step"] = "await_description"
-
-        text = (
-            f"Got it: *{meal_type.capitalize()}*.\n\n"
-            "What did you eat? You can type it in plain text (e.g. `oats with banana`) "
-            "or something simple like `oats`."
+        return (
+            f"Got it: {meal_type.capitalize()}.\n\nWhat did you eat?",
+            None,
+            state,
         )
 
-        return text, None, state
-
-    # Step: ask whether to enter macros
     if step == "ask_macros_choice":
         if callback_data == "food_macros_yes":
             state["step"] = "await_calories"
-            text = "Okay, let’s add macros.\n\nFirst, how many *calories*?"
-            return text, None, state
-
+            return "Okay. First, how many calories?", None, state
         if callback_data == "food_macros_no":
-            # Skip macros completely, go to notes choice
             state["step"] = "ask_notes_choice"
-            text = (
-                "No problem, we’ll log it without macros.\n\n"
-                "Do you want to add any notes? (e.g. hunger, cravings, digestion)"
+            return (
+                "Do you want to add any notes?",
+                {
+                    "inline_keyboard": [
+                        [
+                            {"text": "Add notes ✍️", "callback_data": "food_notes_yes"},
+                            {"text": "Skip", "callback_data": "food_notes_no"},
+                        ],
+                        [{"text": "Cancel ❌", "callback_data": "food_cancel"}],
+                    ]
+                },
+                state,
             )
-            reply_markup = {
-                "inline_keyboard": [
-                    [
-                        {"text": "Add notes ✍️", "callback_data": "food_notes_yes"},
-                        {"text": "Skip", "callback_data": "food_notes_no"},
-                    ],
-                    [
-                        {"text": "Cancel ❌", "callback_data": "food_cancel"},
-                    ],
-                ]
-            }
-            return text, reply_markup, state
 
-    # Step: ask notes choice
     if step == "ask_notes_choice":
         if callback_data == "food_notes_yes":
             state["step"] = "await_notes"
-            text = "Okay, type any notes you want to store with this meal."
-            return text, None, state
-
+            return "Okay, type your notes.", None, state
         if callback_data == "food_notes_no":
-            # No notes → directly show preview
             state["step"] = "preview"
             text, reply_markup = _build_preview(data)
             return text, reply_markup, state
 
-    # Step: preview – confirm or cancel
     if step == "preview":
         if callback_data == "food_confirm":
-            # Signal to caller that we are ready to write to DB
-            # The webhook will handle DB insert using state["data"].
-            text = "Logging your meal now…"
-            # Returning None state here means the caller should clear state
-            # *after* successful DB insert.
-            return text, None, state
-
+            return "Logging your meal now…", None, state
         if callback_data == "food_edit":
-            # Simple implementation: jump back to description
             state["step"] = "await_description"
-            text = (
-                "Let’s edit this meal.\n\n"
-                "Send the description again (e.g. `oats with banana`)."
-            )
-            return text, None, state
+            return "Let’s edit. Send the description again.", None, state
 
-        if callback_data == "food_cancel":
-            text = "Okay, cancelled the food log."
-            return text, None, None
-
-    # Fallback: unknown callback within food flow
-    text = "I did not understand that option. Please continue or cancel."
-    return text, None, state
+    return "I didn’t understand that option.", None, state
 
 
-def handle_food_text(
-    chat_id: int | str,
-    text: str,
-    state: FoodState,
-) -> Reply:
-    """
-    Handle incoming text while we are in the food flow.
-    """
+def handle_food_text(chat_id: int | str, text: str, state: FoodState) -> Reply:
     step = state.get("step")
     data = state.get("data") or {}
 
-    # STEP: await_description
+    # 1) Description
     if step == "await_description":
-        # For now, we keep this simple:
-        # - We accept the user’s text as the meal_name.
-        # - No GPT is used; this is deterministic.
         data["meal_name"] = text.strip()
         state["step"] = "ask_macros_choice"
-
-        prompt = (
-            f"Meal description saved as:\n`{data['meal_name']}`\n\n"
-            "Do you want to enter full macros (calories, protein, carbs, fat, fibre)?"
+        return (
+            f"Saved: `{data['meal_name']}`\n\nDo you want to enter full macros?",
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "Yes", "callback_data": "food_macros_yes"},
+                        {"text": "No", "callback_data": "food_macros_no"},
+                    ],
+                    [{"text": "Cancel ❌", "callback_data": "food_cancel"}],
+                ]
+            },
+            state,
         )
-        reply_markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "Yes, enter macros", "callback_data": "food_macros_yes"},
-                    {"text": "No, skip macros", "callback_data": "food_macros_no"},
-                ],
-                [
-                    {"text": "Cancel ❌", "callback_data": "food_cancel"},
-                ],
-            ]
-        }
 
-        return prompt, reply_markup, state
-
-    # STEP: await_calories
+    # 2) Calories
     if step == "await_calories":
-        val = _parse_number(text)
+        normalized = normalize_input(text, "macros")
+        val = normalized.get("calories") if normalized else None
         if val is None:
-            return "Please enter calories as a number (e.g. `520`).", None, state
+            try:
+                val = float(text.strip())
+            except ValueError:
+                val = None
+
+        if val is None:
+            return "Please enter calories as a number.", None, state
 
         data["calories"] = val
         state["step"] = "await_protein"
-        return "Protein in grams? (e.g. `32`)", None, state
+        return "Protein in grams?", None, state
 
-    # STEP: await_protein
+    # 3) Protein
     if step == "await_protein":
-        val = _parse_number(text)
+        normalized = normalize_input(text, "macros")
+        val = normalized.get("protein") if normalized else None
         if val is None:
-            return "Please enter protein as a number in grams (e.g. `32`).", None, state
+            try:
+                val = float(text.strip())
+            except ValueError:
+                val = None
+
+        if val is None:
+            return "Please enter protein as a number.", None, state
 
         data["protein_g"] = val
         state["step"] = "await_carbs"
-        return "Carbs in grams? (e.g. `45`).", None, state
+        return "Carbs in grams?", None, state
 
-    # STEP: await_carbs
+    # 4) Carbs
     if step == "await_carbs":
-        val = _parse_number(text)
+        normalized = normalize_input(text, "macros")
+        val = normalized.get("carbs") if normalized else None
         if val is None:
-            return "Please enter carbs as a number in grams (e.g. `45`).", None, state
+            try:
+                val = float(text.strip())
+            except ValueError:
+                val = None
+
+        if val is None:
+            return "Please enter carbs as a number.", None, state
 
         data["carbs_g"] = val
         state["step"] = "await_fat"
-        return "Fat in grams? (e.g. `18`).", None, state
+        return "Fat in grams?", None, state
 
-    # STEP: await_fat
+    # 5) Fat
     if step == "await_fat":
-        val = _parse_number(text)
+        normalized = normalize_input(text, "macros")
+        val = normalized.get("fat") if normalized else None
         if val is None:
-            return "Please enter fat as a number in grams (e.g. `18`).", None, state
+            try:
+                val = float(text.strip())
+            except ValueError:
+                val = None
+
+        if val is None:
+            return "Please enter fat as a number.", None, state
 
         data["fat_g"] = val
         state["step"] = "await_fiber"
-        return "Fibre in grams? (optional, you can also type `skip`).", None, state
+        return "Fibre in grams? (optional, or type `skip`)", None, state
 
-    # STEP: await_fiber
+    # 6) Fibre
     if step == "await_fiber":
-        if text.strip().lower() == "skip":
+        if text.strip().lower() in {"skip", "no"}:
             data["fiber_g"] = None
         else:
-            val = _parse_number(text)
+            normalized = normalize_input(text, "macros")
+            val = normalized.get("fiber") if normalized else None
             if val is None:
-                return (
-                    "Please enter fibre as a number in grams (e.g. `8`) or type `skip`.",
-                    None,
-                    state,
-                )
+                try:
+                    val = float(text.strip())
+                except ValueError:
+                    return "Please enter fibre as a number or type `skip`.", None, state
             data["fiber_g"] = val
 
-        # After fibre we go to notes choice
         state["step"] = "ask_notes_choice"
-        prompt = (
-            "Do you want to add any notes? (e.g. hunger, cravings, digestion, context)"
+        return (
+            "Add notes?",
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "Yes ✍️", "callback_data": "food_notes_yes"},
+                        {"text": "Skip", "callback_data": "food_notes_no"},
+                    ],
+                    [{"text": "Cancel ❌", "callback_data": "food_cancel"}],
+                ]
+            },
+            state,
         )
-        reply_markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "Add notes ✍️", "callback_data": "food_notes_yes"},
-                    {"text": "Skip", "callback_data": "food_notes_no"},
-                ],
-                [
-                    {"text": "Cancel ❌", "callback_data": "food_cancel"},
-                ],
-            ]
-        }
-        return prompt, reply_markup, state
 
-    # STEP: await_notes
+    # 7) Notes
     if step == "await_notes":
         data["notes"] = text.strip()
         state["step"] = "preview"
-        preview_text, reply_markup = _build_preview(data)
-        return preview_text, reply_markup, state
+        text_out, reply_markup = _build_preview(data)
+        return text_out, reply_markup, state
 
-    # Fallback
-    return "I’m not sure where we are in the food flow. Let’s cancel and start again.", None, None
-
-
-def _parse_number(text: str) -> Optional[float]:
-    """
-    Parse a numeric string into a float.
-    Returns None if parsing fails.
-    """
-    text = text.strip().replace(",", ".")
-    try:
-        return float(text)
-    except ValueError:
-        return None
+    return "I’m lost. Let’s cancel this meal log.", None, None
 
 
 def _build_preview(data: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    """
-    Build a preview message and inline keyboard for confirmation.
-    """
     meal_name = data.get("meal_name") or "Meal"
     meal_type = data.get("meal_type") or "meal"
-
     calories = data.get("calories")
     protein = data.get("protein_g")
     carbs = data.get("carbs_g")
@@ -326,7 +264,7 @@ def _build_preview(data: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         lines.append(f"• Notes: {notes}")
 
     lines.append("")
-    lines.append("Confirm to log this meal or cancel to discard it.")
+    lines.append("Confirm to log this meal or cancel.")
 
     reply_markup = {
         "inline_keyboard": [
@@ -334,10 +272,7 @@ def _build_preview(data: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
                 {"text": "Confirm ✅", "callback_data": "food_confirm"},
                 {"text": "Edit ✏️", "callback_data": "food_edit"},
             ],
-            [
-                {"text": "Cancel ❌", "callback_data": "food_cancel"},
-            ],
+            [{"text": "Cancel ❌", "callback_data": "food_cancel"}],
         ]
     }
-
     return "\n".join(lines), reply_markup
