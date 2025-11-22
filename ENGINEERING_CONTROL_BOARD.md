@@ -170,6 +170,8 @@ YAHA uses dual engines:
 This architecture minimizes GPT spend while maximizing smart features.
 • Build 016 completed the callback router, main menu, and initial guided stubs for Sleep and Exercise. Next required sub-step: 3C.2 — Media Ingestion (OCR/ASR parsing layer).
 • Build 017 completed the full multi-step Sleep and Exercise flows with schema-accurate field collection, preview/confirm cycles, and Supabase writes; Telegram UX is now fully deterministic. Next required sub-steps: GPT fallback for ambiguous inputs + flexible time parsing + simplification of input fields (intensity/effort).
+• Build 018 introduces GPT fallback across all flows (guided + free-text), removes rigid input fields, adds flexible time parsing, and unifies automatic schema repair for ambiguous user input. Next required sub-step: 3C.3 — Unified Media→GPT→Schema pipeline.
+
 
 
 
