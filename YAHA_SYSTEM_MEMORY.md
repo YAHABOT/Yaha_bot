@@ -1065,6 +1065,35 @@ Exercise metadata refinement
 
 Fallback handling for vague mixed intents
 
+Build 017 — Status: Complete
+
+Objective:
+Upgrade sleep and exercise flows to schema-accurate multi-step deterministic flows.
+
+Implementation Summary:
+
+Built new sleep_flow.py and exercise_flow.py with full step machines, skip logic, and preview rendering.
+
+Extended callback router to support confirm/edit/cancel cycles and Supabase writes.
+
+Updated UX builder for schema-accurate displayed fields.
+
+Decoupled flows from webhook text ingestion.
+
+Deployment bug fixed: extra quote in webhook return.
+
+Regression Safety:
+
+Food flow unchanged
+
+Parser Engine unchanged
+
+Only the Telegram UX layer modified
+
+Next Build Trigger:
+User requests three improvements → Build 018.
+
+
 ---
 
 
