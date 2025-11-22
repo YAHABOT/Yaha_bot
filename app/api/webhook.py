@@ -1,4 +1,3 @@
-# app/api/webhook.py
 from __future__ import annotations
 
 import logging
@@ -8,22 +7,15 @@ from typing import Any, Dict
 from flask import Blueprint, jsonify, request
 
 from app.parser_engine.router import parse_text_message
-from app.services.telegram import send_message
 from app.services.supabase import insert_record, log_entry
+from app.services.telegram import send_message
 from app.telegram import build_reply_for_parsed
-from app.telegram.state import get_state, set_state, clear_state
 from app.telegram.callbacks import handle_callback
+from app.telegram.flows.exercise_flow import handle_exercise_text, start_exercise_flow
+from app.telegram.flows.food_flow import handle_food_text, start_food_flow
+from app.telegram.flows.sleep_flow import handle_sleep_text, start_sleep_flow
+from app.telegram.state import clear_state, get_state, set_state
 from app.telegram.ux import build_main_menu
-from app.telegram.flows.food_flow import (
-    start_food_flow,
-    handle_food_text,
-)
-from app.telegram.flows.sleep_flow import (
-    handle_sleep_text,
-)
-from app.telegram.flows.exercise_flow import (
-    handle_exercise_text,
-)
 
 api = Blueprint("api", __name__)
 
@@ -41,20 +33,26 @@ def healthcheck() -> str:
 
 @api.route("/webhook", methods=["POST"])
 def webhook() -> Any:
+    """
+    Main Telegram webhook endpoint.
+
+    Handles:
+    - callback_query (inline buttons) via callbacks.py
+    - multi-step flows (food / sleep / exercise)
+    - top-level commands (/food, /sleep, /exercise, menu)
+    - free-text logs via Parser Engine v2
+    """
     update: Dict[str, Any] = request.get_json(silent=True) or {}
 
-    # ----------------------------------------------------------------------
-    # CALLBACK QUERIES (inline buttons)
-    # ----------------------------------------------------------------------
+    # 1) Inline button callbacks
     if "callback_query" in update:
         handle_callback(update["callback_query"])
         return jsonify({"ok": True})
 
-    # ----------------------------------------------------------------------
-    # TEXT MESSAGES
-    # ----------------------------------------------------------------------
+    # 2) Text messages
     message = update.get("message")
     if not message or "text" not in message:
+        # Ignore non-text updates for now
         return jsonify({"ok": True})
 
     chat = message.get("chat") or {}
@@ -64,72 +62,69 @@ def webhook() -> Any:
     if not chat_id or not raw_text:
         return jsonify({"ok": True})
 
-    # ----------------------------------------------------------------------
-    # ACTIVE MULTI-STEP FLOWS
-    # ----------------------------------------------------------------------
+    # 3) Check multi-step flow state first
     state = get_state(chat_id)
+    if state:
+        flow = state.get("flow")
 
-    # FOOD FLOW (existing)
-    if state and state.get("flow") == "food":
-        reply_text, reply_markup, new_state = handle_food_text(chat_id, raw_text, state)
+        if flow == "food":
+            reply_text, reply_markup, new_state = handle_food_text(chat_id, raw_text, state)
+            if new_state is None:
+                clear_state(chat_id)
+            else:
+                set_state(chat_id, new_state)
+            send_message(chat_id, reply_text, reply_markup=reply_markup)
+            return jsonify({"ok": True})
 
-        if new_state is None:
-            clear_state(chat_id)
-        else:
-            set_state(chat_id, new_state)
+        if flow == "sleep":
+            reply_text, reply_markup, new_state = handle_sleep_text(chat_id, raw_text, state)
+            if new_state is None:
+                clear_state(chat_id)
+            else:
+                set_state(chat_id, new_state)
+            send_message(chat_id, reply_text, reply_markup=reply_markup)
+            return jsonify({"ok": True})
 
-        send_message(chat_id, reply_text, reply_markup=reply_markup)
-        return jsonify({"ok": True})
+        if flow == "exercise":
+            reply_text, reply_markup, new_state = handle_exercise_text(chat_id, raw_text, state)
+            if new_state is None:
+                clear_state(chat_id)
+            else:
+                set_state(chat_id, new_state)
+            send_message(chat_id, reply_text, reply_markup=reply_markup)
+            return jsonify({"ok": True})
 
-    # SLEEP FLOW (guided, Build 017)
-    if state and state.get("flow") == "sleep":
-        reply_text, reply_markup, new_state = handle_sleep_text(chat_id, raw_text, state)
-
-        if new_state is None:
-            clear_state(chat_id)
-        else:
-            set_state(chat_id, new_state)
-
-        send_message(chat_id, reply_text, reply_markup=reply_markup)
-        return jsonify({"ok": True})
-
-    # EXERCISE FLOW (guided, Build 017)
-    if state and state.get("flow") == "exercise":
-        reply_text, reply_markup, new_state = handle_exercise_text(chat_id, raw_text, state)
-
-        if new_state is None:
-            clear_state(chat_id)
-        else:
-            set_state(chat_id, new_state)
-
-        send_message(chat_id, reply_text, reply_markup=reply_markup)
-        return jsonify({"ok": True})
-
-    # ----------------------------------------------------------------------
-    # SHORTCUT COMMANDS
-    # ----------------------------------------------------------------------
+    # 4) No active flow: handle commands / shortcuts
     lower = raw_text.lower()
-
     if lower == "menu":
         text, reply_markup = build_main_menu()
         send_message(chat_id, text, reply_markup=reply_markup)
         return jsonify({"ok": True})
 
-    if lower in ("/food", "log food", "add food", "log meal"):
+    if lower in {"/food", "log food", "add food", "log meal"}:
         reply_text, reply_markup, new_state = start_food_flow(chat_id)
         set_state(chat_id, new_state)
         send_message(chat_id, reply_text, reply_markup=reply_markup)
         return jsonify({"ok": True})
 
-    # ----------------------------------------------------------------------
-    # PARSER ENGINE (GPT + Schemas)
-    # ----------------------------------------------------------------------
+    if lower in {"/sleep", "log sleep", "add sleep"}:
+        reply_text, reply_markup, new_state = start_sleep_flow(chat_id)
+        set_state(chat_id, new_state)
+        send_message(chat_id, reply_text, reply_markup=reply_markup)
+        return jsonify({"ok": True})
+
+    if lower in {"/exercise", "log exercise", "log workout", "add workout"}:
+        reply_text, reply_markup, new_state = start_exercise_flow(chat_id)
+        set_state(chat_id, new_state)
+        send_message(chat_id, reply_text, reply_markup=reply_markup)
+        return jsonify({"ok": True})
+
+    # 5) Otherwise, default to Parser Engine v2
     try:
         parsed = parse_text_message(raw_text)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logging.exception("[PARSER ERROR] %s", e)
         send_message(chat_id, "❌ I hit an internal error while parsing that. Try again.")
-
         log_entry(
             chat_id=str(chat_id),
             raw_text=raw_text,
@@ -142,10 +137,10 @@ def webhook() -> Any:
     container = parsed.get("container", "unknown")
     data = parsed.get("data") or {}
 
-    # Build UX reply (text + optional inline keyboard)
+    # 6) Build user-facing reply
     reply_text, reply_markup = build_reply_for_parsed(raw_text, parsed)
 
-    # Unknown container → DO NOT WRITE TO ANY TABLE
+    # Invalid / unknown containers → log but don't write to domain tables
     if container not in VALID_CONTAINERS:
         log_entry(
             chat_id=str(chat_id),
@@ -157,19 +152,15 @@ def webhook() -> Any:
         send_message(chat_id, reply_text, reply_markup=reply_markup)
         return jsonify({"ok": True})
 
-    # ----------------------------------------------------------------------
-    # VALID CONTAINER → WRITE TO SUPABASE
-    # ----------------------------------------------------------------------
+    # 7) Valid container → write to Supabase
     final_data = dict(data)
     final_data["chat_id"] = str(chat_id)
     final_data["date"] = _today_utc_iso()
 
     success, error = insert_record(container, final_data)
-
     if not success:
         logging.error("[SUPABASE ERROR %s] %s", container, error)
         send_message(chat_id, f"❌ Could not log entry.\n{error}")
-
         log_entry(
             chat_id=str(chat_id),
             raw_text=raw_text,
