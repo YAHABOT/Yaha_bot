@@ -1007,53 +1007,63 @@ Parser Engine v2 introduces deterministic JSON parsing, strict schema validation
   🔜 Ready for Step 3.2: Multi-step flows (premium UX)
 
 
-### [2025-11-20] — Build 0XX — UX Preview Foundation + Parser v2 + Inline Button Failure + TG Menu Direction
+[2025-11-21] — Build 016 — Telegram UX Engine Wiring (Sleep & Exercise Flows + Callback Router)
 
-- One-line Summary:
-  Implemented preview-card foundation and parser v2, identified the missing callback subsystem, and locked the decision to replace /commands with a persistent Telegram menu button.
+Summary: Completed wiring of Telegram UX Engine with main menu, callback router, and initial multi-step guided flows for sleep & exercise. Parser Engine protected and unaffected.
 
-- What we accomplished:
-  • Parser v2 fully rebuilt with deterministic JSON contract.
-  • Strict schemas for food/sleep/exercise/unknown implemented.
-  • meal_type extraction rules added and stabilized.
-  • Added missing Supabase column (meal_type).
-  • Free-form logging behaves correctly (instant log, no preview).
-  • First version of structured food preview created with inline buttons
-    (Confirm / Edit / Cancel).
-  • Inline buttons display correctly inside Telegram.
+Problem:
+Previous builds only supported Food guided flow. Sleep & Exercise could only be logged via free text. Inline buttons appeared but didn’t work, flows didn’t retain state, and callback routing was still inside webhook.py.
 
-- What failed / requires follow-up:
-  • Confirm/Edit/Cancel buttons do NOT work yet because:
-      - /webhook does not handle `callback_query`.
-      - No preview queue exists to store pending structured logs.
-      - No finalize handler exists to turn a preview into a DB insert.
-      - No edit/cancel routing implemented.
-  • Result: preview displays but all buttons are non-functional.
-  • This is intentional, expected, and the next module to build.
+Changes:
 
-- New UX Decisions (Locked):
-  • YAHA will NOT use /food, /sleep, /exercise commands.
-  • YAHA will use a **persistent Telegram menu button** instead.
-      - Menu options will include:
-          1. Log Food
-          2. Log Sleep
-          3. Log Exercise
-          4. View Today
-          5. View Last Logs
-          6. Dashboard (webapp)
-          7. Help
-  • Structured multi-step flows (with previews) are only triggered from menu.
-  • Free-form text ALWAYS logs instantly (no preview).
+Created app/telegram/callbacks.py
+Centralized callback router for:
+main_menu, log_food, log_sleep, log_exercise, view_day, and all food_* flow callbacks.
 
-- Impact:
-  • Core parsing + instant logging stable.
-  • Preview UX foundation is built, but blocked until callback system is added.
-  • TG menu will replace all slash commands and become the primary navigation.
+Updated app/api/webhook.py
 
-- Status:
-  ⚠️ Partial — preview UI exists, callback engine missing.
-  🟢 Direction locked for Step 3 UX.
-  🔜 Next step: Implement callback_query routing + preview queue.
+Replaced old inline callback handler
+
+Added routing: text “menu” → Main Menu
+
+Created sleep_flow.py (Quality → Duration → Energy)
+
+Created exercise_flow.py (Type → Duration → Intensity)
+
+Updated ux.py
+
+Added build_main_menu()
+
+Ensured DB write logic still lives in callback layer for food confirmations
+
+No changes to Parser Engine (protected)
+
+Testing:
+
+Inline main menu appears
+
+Buttons fire callbacks correctly
+
+Sleep & Exercise flows begin and move to step 2
+
+Text logs still insert to Supabase correctly
+
+Regression: “oats 500 kcal” → food row inserted
+
+Sleep & exercise flows produce DB rows (partially complete, as expected for stubs)
+
+Status: ⚠️ Partial – foundation implemented.
+Sleep/Exercise stubs exist but still missing:
+
+Multi-step completeness
+
+Merge-into-existing-row logic
+
+Sleep start/end timestamp parsing
+
+Exercise metadata refinement
+
+Fallback handling for vague mixed intents
 
 ---
 
