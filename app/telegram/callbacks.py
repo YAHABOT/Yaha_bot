@@ -1,30 +1,29 @@
-# app/telegram/callbacks.py
 from __future__ import annotations
 
-from typing import Any, Dict
 from datetime import datetime, timezone
+from typing import Any, Dict
 
+from app.services.supabase import insert_record
 from app.services.telegram import answer_callback_query, send_message
-from app.services.supabase import insert_record, log_entry
-from app.telegram.state import get_state, set_state, clear_state
-from app.telegram.ux import build_main_menu
+from app.telegram.flows.exercise_flow import (
+    handle_exercise_callback,
+    start_exercise_flow,
+)
 from app.telegram.flows.food_flow import (
-    start_food_flow,
     handle_food_callback,
+    start_food_flow,
 )
 from app.telegram.flows.sleep_flow import (
-    start_sleep_flow,
     handle_sleep_callback,
+    start_sleep_flow,
 )
-from app.telegram.flows.exercise_flow import (
-    start_exercise_flow,
-    handle_exercise_callback,
-)
+from app.telegram.state import clear_state, get_state, set_state
+from app.telegram.ux import build_main_menu
 
 
 def handle_callback(callback: Dict[str, Any]) -> None:
     """
-    Central router for all callback queries.
+    Central router for all inline button callback queries.
     """
     callback_id = callback.get("id")
     message = callback.get("message") or {}
@@ -35,55 +34,45 @@ def handle_callback(callback: Dict[str, Any]) -> None:
     if not callback_id or not chat_id:
         return
 
-    # 1. Main Menu
+    # 1) Main menu button
     if data == "main_menu":
         text, reply_markup = build_main_menu()
         send_message(chat_id, text, reply_markup=reply_markup)
         answer_callback_query(callback_id)
         return
 
-    # 2. Log Food (Start Flow)
-    if data == "log_food" or data == "start_food":
+    # 2) Start flows from menu / guidance buttons
+    if data in {"log_food", "start_food"}:
         reply_text, reply_markup, new_state = start_food_flow(chat_id)
         set_state(chat_id, new_state)
         send_message(chat_id, reply_text, reply_markup=reply_markup)
         answer_callback_query(callback_id)
         return
 
-    # 3. Log Sleep (Start Flow)
-    if data == "log_sleep" or data == "start_sleep":
+    if data in {"log_sleep", "start_sleep"}:
         reply_text, reply_markup, new_state = start_sleep_flow(chat_id)
         set_state(chat_id, new_state)
         send_message(chat_id, reply_text, reply_markup=reply_markup)
         answer_callback_query(callback_id)
         return
 
-    # 4. Log Exercise (Start Flow)
-    if data == "log_exercise" or data == "start_exercise":
+    if data in {"log_exercise", "start_exercise"}:
         reply_text, reply_markup, new_state = start_exercise_flow(chat_id)
         set_state(chat_id, new_state)
         send_message(chat_id, reply_text, reply_markup=reply_markup)
         answer_callback_query(callback_id)
         return
 
-    # 5. View Day
-    if data == "view_day":
-        send_message(chat_id, "📋 Daily summary coming soon!")
-        answer_callback_query(callback_id)
-        return
-
-    # Fetch current state (for all flows)
+    # Fetch state once – flows below rely on it.
     state = get_state(chat_id)
 
-    # 6. Food Flow Callbacks
+    # 3) Food flow callbacks
     if (state and state.get("flow") == "food") or data.startswith("food_"):
         reply_text, reply_markup, new_state = handle_food_callback(chat_id, data, state)
 
-        # Completion: confirm food log
         if state and state.get("step") == "preview" and data == "food_confirm":
             final_state = new_state or state
             food_data = final_state.get("data") or {}
-
             record = dict(food_data)
             record["chat_id"] = str(chat_id)
             record["date"] = datetime.now(timezone.utc).date().isoformat()
@@ -109,15 +98,13 @@ def handle_callback(callback: Dict[str, Any]) -> None:
         answer_callback_query(callback_id)
         return
 
-    # 7. Sleep Flow Callbacks
+    # 4) Sleep flow callbacks
     if (state and state.get("flow") == "sleep") or data.startswith("sleep_"):
         reply_text, reply_markup, new_state = handle_sleep_callback(chat_id, data, state)
 
-        # Completion: confirm sleep log
         if state and state.get("step") == "preview" and data == "sleep_confirm":
             final_state = new_state or state
             sleep_data = final_state.get("data") or {}
-
             record = dict(sleep_data)
             record["chat_id"] = str(chat_id)
             record["date"] = datetime.now(timezone.utc).date().isoformat()
@@ -143,15 +130,13 @@ def handle_callback(callback: Dict[str, Any]) -> None:
         answer_callback_query(callback_id)
         return
 
-    # 8. Exercise Flow Callbacks
+    # 5) Exercise flow callbacks
     if (state and state.get("flow") == "exercise") or data.startswith("ex_"):
         reply_text, reply_markup, new_state = handle_exercise_callback(chat_id, data, state)
 
-        # Completion: confirm exercise log
         if state and state.get("step") == "preview" and data == "ex_confirm":
             final_state = new_state or state
             ex_data = final_state.get("data") or {}
-
             record = dict(ex_data)
             record["chat_id"] = str(chat_id)
             record["date"] = datetime.now(timezone.utc).date().isoformat()
@@ -177,5 +162,5 @@ def handle_callback(callback: Dict[str, Any]) -> None:
         answer_callback_query(callback_id)
         return
 
-    # 9. Fallback / Unknown
+    # 6) Fallback – just close the spinner
     answer_callback_query(callback_id)
