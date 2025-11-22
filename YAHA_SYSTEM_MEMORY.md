@@ -1093,6 +1093,22 @@ Only the Telegram UX layer modified
 Next Build Trigger:
 User requests three improvements → Build 018.
 
+[2025-11-22] — Build 018 — GPT Fallback Engine + Flexible Input Layer
+
+Summary: Added GPT-based fallback for all guided flows and free-text logs. Removed restrictive UI fields (perceived_intensity, effort_description, and bucketed scoring). Implemented flexible timestamp interpretation and automatic schema repair for incomplete or ambiguous inputs.
+
+Problem: Build 017 still required strict formatting for numbers and timestamps, causing failures when users entered natural language values (e.g., “11pm”, “6ish”, “slept at midnight”). Exercise flow contained redundant fields. Parser Engine alone couldn’t handle ambiguous inputs.
+
+Changes:
+- Removed perceived_intensity and effort_description from exercise_flow
+- Added free-text input for sleep_score, energy_score, and training_intensity
+- Created GPT fallback module used by all flows
+- Added flexible timestamp normalization (“11pm”, “midnight”, “6:00”, “6am”, etc.)
+- Added universal fallback path for ambiguous logs (photos/voice future-ready)
+- Integrated fallback pipeline into webhook, flows, and callbacks
+- Parser Engine remains primary, GPT only activates when regex/logic fails
+
+Status: In Progress (foundation complete; media fallback begins next build)
 
 ---
 
