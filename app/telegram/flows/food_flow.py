@@ -51,6 +51,7 @@ def handle_food_callback(chat_id: int | str, callback_data: str, state: FoodStat
     if callback_data == "food_cancel":
         return "Okay, cancelled the food log.", None, None
 
+    # 1) Meal type selection
     if step == "choose_meal_type" and callback_data.startswith("food_mealtype_"):
         meal_type = callback_data.removeprefix("food_mealtype_")
         data["meal_type"] = meal_type
@@ -61,10 +62,12 @@ def handle_food_callback(chat_id: int | str, callback_data: str, state: FoodStat
             state,
         )
 
+    # 2) After entering meal description: macros yes/no
     if step == "ask_macros_choice":
         if callback_data == "food_macros_yes":
             state["step"] = "await_calories"
             return "Okay. First, how many calories?", None, state
+
         if callback_data == "food_macros_no":
             state["step"] = "ask_notes_choice"
             return (
@@ -81,18 +84,46 @@ def handle_food_callback(chat_id: int | str, callback_data: str, state: FoodStat
                 state,
             )
 
+    # 3) Skip buttons for macros
+    if step == "await_protein" and callback_data == "food_skip_protein":
+        data["protein_g"] = None
+        state["step"] = "await_carbs"
+        return (
+            "Carbs in grams?\nOr tap Skip.",
+            {"inline_keyboard": [[{"text": "Skip", "callback_data": "food_skip_carbs"}]]},
+            state,
+        )
+
+    if step == "await_carbs" and callback_data == "food_skip_carbs":
+        data["carbs_g"] = None
+        state["step"] = "await_fat"
+        return (
+            "Fat in grams?\nOr tap Skip.",
+            {"inline_keyboard": [[{"text": "Skip", "callback_data": "food_skip_fat"}]]},
+            state,
+        )
+
+    if step == "await_fat" and callback_data == "food_skip_fat":
+        data["fat_g"] = None
+        state["step"] = "await_fiber"
+        return "Fibre in grams? (optional, or type `skip`)", None, state
+
+    # 4) Notes skip
     if step == "ask_notes_choice":
         if callback_data == "food_notes_yes":
             state["step"] = "await_notes"
             return "Okay, type your notes.", None, state
+
         if callback_data == "food_notes_no":
             state["step"] = "preview"
             text, reply_markup = _build_preview(data)
             return text, reply_markup, state
 
+    # 5) Preview screen
     if step == "preview":
         if callback_data == "food_confirm":
             return "Logging your meal now…", None, state
+
         if callback_data == "food_edit":
             state["step"] = "await_description"
             return "Let’s edit. Send the description again.", None, state
@@ -130,14 +161,15 @@ def handle_food_text(chat_id: int | str, text: str, state: FoodState) -> Reply:
             try:
                 val = float(text.strip())
             except ValueError:
-                val = None
-
-        if val is None:
-            return "Please enter calories as a number.", None, state
+                return "Please enter calories as a number.", None, state
 
         data["calories"] = val
         state["step"] = "await_protein"
-        return "Protein in grams?", None, state
+        return (
+            "Protein in grams?\nOr tap Skip.",
+            {"inline_keyboard": [[{"text": "Skip", "callback_data": "food_skip_protein"}]]},
+            state,
+        )
 
     # 3) Protein
     if step == "await_protein":
@@ -147,14 +179,15 @@ def handle_food_text(chat_id: int | str, text: str, state: FoodState) -> Reply:
             try:
                 val = float(text.strip())
             except ValueError:
-                val = None
-
-        if val is None:
-            return "Please enter protein as a number.", None, state
+                return "Please enter protein as a number or tap Skip.", None, state
 
         data["protein_g"] = val
         state["step"] = "await_carbs"
-        return "Carbs in grams?", None, state
+        return (
+            "Carbs in grams?\nOr tap Skip.",
+            {"inline_keyboard": [[{"text": "Skip", "callback_data": "food_skip_carbs"}]]},
+            state,
+        )
 
     # 4) Carbs
     if step == "await_carbs":
@@ -164,14 +197,15 @@ def handle_food_text(chat_id: int | str, text: str, state: FoodState) -> Reply:
             try:
                 val = float(text.strip())
             except ValueError:
-                val = None
-
-        if val is None:
-            return "Please enter carbs as a number.", None, state
+                return "Please enter carbs as a number or tap Skip.", None, state
 
         data["carbs_g"] = val
         state["step"] = "await_fat"
-        return "Fat in grams?", None, state
+        return (
+            "Fat in grams?\nOr tap Skip.",
+            {"inline_keyboard": [[{"text": "Skip", "callback_data": "food_skip_fat"}]]},
+            state,
+        )
 
     # 5) Fat
     if step == "await_fat":
@@ -181,10 +215,7 @@ def handle_food_text(chat_id: int | str, text: str, state: FoodState) -> Reply:
             try:
                 val = float(text.strip())
             except ValueError:
-                val = None
-
-        if val is None:
-            return "Please enter fat as a number.", None, state
+                return "Please enter fat as a number or tap Skip.", None, state
 
         data["fat_g"] = val
         state["step"] = "await_fiber"
@@ -232,36 +263,24 @@ def handle_food_text(chat_id: int | str, text: str, state: FoodState) -> Reply:
 def _build_preview(data: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     meal_name = data.get("meal_name") or "Meal"
     meal_type = data.get("meal_type") or "meal"
-    calories = data.get("calories")
-    protein = data.get("protein_g")
-    carbs = data.get("carbs_g")
-    fat = data.get("fat_g")
-    fiber = data.get("fiber_g")
-    notes = data.get("notes")
+
+    def fmt(val, suffix):
+        return f"{val}{suffix}" if val is not None else "—"
 
     lines = [
         "🍽 FOOD LOG (Preview)",
         f"• Type: {meal_type.capitalize()}",
         f"• Name: {meal_name}",
+        "• Macros:",
+        f"   - {fmt(data.get('calories'), ' kcal')}",
+        f"   - {fmt(data.get('protein_g'), ' g P')}",
+        f"   - {fmt(data.get('carbs_g'), ' g C')}",
+        f"   - {fmt(data.get('fat_g'), ' g F')}",
+        f"   - {fmt(data.get('fiber_g'), ' g fibre')}",
     ]
 
-    macro_parts = []
-    if calories is not None:
-        macro_parts.append(f"{calories} kcal")
-    if protein is not None:
-        macro_parts.append(f"{protein} g P")
-    if carbs is not None:
-        macro_parts.append(f"{carbs} g C")
-    if fat is not None:
-        macro_parts.append(f"{fat} g F")
-    if fiber is not None:
-        macro_parts.append(f"{fiber} g fibre")
-
-    if macro_parts:
-        lines.append("• Macros: " + " | ".join(macro_parts))
-
-    if notes:
-        lines.append(f"• Notes: {notes}")
+    if data.get("notes"):
+        lines.append(f"• Notes: {data['notes']}")
 
     lines.append("")
     lines.append("Confirm to log this meal or cancel.")
@@ -275,4 +294,5 @@ def _build_preview(data: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
             [{"text": "Cancel ❌", "callback_data": "food_cancel"}],
         ]
     }
+
     return "\n".join(lines), reply_markup
