@@ -1,8 +1,8 @@
 diff --git a/app/telegram/flows/exercise_flow.py b/app/telegram/flows/exercise_flow.py
-index b08db4dcf9f8d21ac325bf8290aac76aa842953c..4a3af6a2b07cefbacbf6bf12d44b6974e18e983e 100644
+index b08db4dcf9f8d21ac325bf8290aac76aa842953c..a7ead13c067d45607932fc30e8983c8bd8dd2114 100644
 --- a/app/telegram/flows/exercise_flow.py
 +++ b/app/telegram/flows/exercise_flow.py
-@@ -31,111 +31,135 @@ def start_exercise_flow(chat_id: int | str) -> Reply:
+@@ -31,111 +31,162 @@ def start_exercise_flow(chat_id: int | str) -> Reply:
      state = _base_state()
      text = "🏃‍♂️ Let’s log a workout.\n\nWhat kind of exercise was it?"
      reply_markup = {
@@ -89,17 +89,44 @@ index b08db4dcf9f8d21ac325bf8290aac76aa842953c..4a3af6a2b07cefbacbf6bf12d44b6974
 +            return text_out, reply_markup, state
 +
 +        prompt_reminders = {
-+            "ask_duration": "How long did you go for? (minutes)",
-+            "ask_distance": "Distance in km? (e.g. 5.2)\nOr tap Skip.",
-+            "ask_calories": "Calories burned?\nOr tap Skip.",
-+            "ask_avg_hr": "Average Heart Rate?\nOr tap Skip.",
-+            "ask_max_hr": "Max Heart Rate?\nOr tap Skip.",
-+            "ask_intensity": "Training Intensity (1–10)?",
-+            "ask_tags": "Any tags? (comma separated)\nOr tap Skip.",
-+            "ask_notes": "Any notes?\nOr tap Skip.",
++            "ask_duration": (
++                "How long did you go for? (minutes)",
++                None,
++            ),
++            "ask_distance": (
++                "Distance in km? (e.g. 5.2)\\nOr tap Skip.",
++                {"inline_keyboard": [[{"text": "Skip ⏩", "callback_data": "ex_skip_dist"}]]},
++            ),
++            "ask_calories": (
++                "Calories burned?\\nOr tap Skip.",
++                {"inline_keyboard": [[{"text": "Skip ⏩", "callback_data": "ex_skip_cals"}]]},
++            ),
++            "ask_avg_hr": (
++                "Average Heart Rate?\\nOr tap Skip.",
++                {"inline_keyboard": [[{"text": "Skip ⏩", "callback_data": "ex_skip_avg_hr"}]]},
++            ),
++            "ask_max_hr": (
++                "Max Heart Rate?\\nOr tap Skip.",
++                {"inline_keyboard": [[{"text": "Skip ⏩", "callback_data": "ex_skip_max_hr"}]]},
++            ),
++            "ask_intensity": (
++                "Training Intensity (1–10)?",
++                {"inline_keyboard": [[{"text": "Cancel ❌", "callback_data": "ex_cancel"}]]},
++            ),
++            "ask_tags": (
++                "Any tags? (comma separated)\\nOr tap Skip.",
++                {"inline_keyboard": [[{"text": "Skip ⏩", "callback_data": "ex_skip_tags"}]]},
++            ),
++            "ask_notes": (
++                "Any notes?\\nOr tap Skip.",
++                {"inline_keyboard": [[{"text": "Skip ⏩", "callback_data": "ex_skip_notes"}]]},
++            ),
 +        }
 +
-+        return prompt_reminders.get(step, "Please send the requested information."), None, state
++        reminder_text, reply_markup = prompt_reminders.get(
++            step, ("Please send the requested information.", None)
++        )
++        return reminder_text, reply_markup, state
 +
      # Type selection
      if step == "ask_type" and callback_data.startswith("ex_type_"):
