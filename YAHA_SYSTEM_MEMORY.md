@@ -1185,6 +1185,153 @@ Affected Files:
 /app/gpt_fallback.py
 
 /app/callbacks.py (depending on where final Supabase write occurs)
+🧾 CHANGE LOG — Build 018 → 018.2 (Food + Exercise Fixes)
+
+Date: 24 Nov 2025
+Status: Fully deployed to Render
+
+✅ 1. Sleep Flow Stabilization (Build 018)
+
+Fixes Completed
+
+Added _attach_sleep_timestamps() to correctly convert HH:MM → ISO 8601 timestamptz.
+
+Implemented cross-midnight logic (start > end → previous day).
+
+Ensured fallback engine provides clean, normalized HH:MM before insertion.
+
+Fully resolved:
+
+“invalid input syntax for type timestamp with time zone”
+
+“Object of type datetime is not JSON serializable”
+
+Sleep flow now logs successfully every time.
+
+✅ 2. Callback Routing Fix
+
+Critical Bug Fixed
+
+All Telegram inline buttons stopped working due to a syntax error in callbacks.py.
+
+Problem: missing parenthesis around set_state().
+
+Fix applied: full callback handler rewritten cleanly and deployed.
+
+UI buttons operational again.
+
+✅ 3. Exercise Flow Rewrite (Build 018.1)
+
+This was a major stability upgrade.
+
+🔧 Structural Fixes
+
+Added proper text-step separation so callbacks never fire during text input.
+
+Added text_steps = {...} set to isolate text-only phases.
+
+Skip logic (ex_skip_*) fully confined to relevant steps only.
+
+Removed legacy skip chains; replaced with unified logic.
+
+🔍 GPT Fallback Fixes
+
+Exercise stats normalized correctly:
+
+distance
+
+calories
+
+heart rate
+
+Fixed bug where avg HR was always null.
+
+🧱 Data Integrity Fixes
+
+workout_name and training_type correctly follow user input.
+
+Preview UI fully updated.
+
+Verified working for Run, Gym, and all other types.
+
+✅ 4. Food Flow Rewrite (Build 018.2) — FLEXIBLE MACROS MODE
+
+This was the biggest change you asked for today.
+
+🌟 New Feature: Macro Skipping
+
+Added skip logic for:
+
+Protein → food_skip_protein
+
+Carbs → food_skip_carbs
+
+Fat → food_skip_fat
+
+🧠 Behavior:
+
+Calories = always required.
+
+Protein/Carbs/Fat = optional.
+
+Fibre = optional (already supported via text skip).
+
+Notes = optional.
+
+🔧 Structural Updates
+
+Added inline buttons for skip on every macro step.
+
+Standardized macro parsing using GPT fallback.
+
+Preview now displays “—” when macro is skipped.
+
+Compatible with Supabase null fields.
+
+🟩 Result
+
+Food logging now supports:
+
+Partial macro entries
+
+GPT-based normalization
+
+Clean skipping
+
+No more forced numeric errors
+
+✅ 5. Documentation Updated
+
+You updated:
+
+ENGINEERING_CONTROL_BOARD.md
+
+YAHA_SYSTEM_MEMORY.md
+
+WORKFLOW_SPEC.md
+based on this session’s output.
+
+These now reflect:
+
+The two-engine architecture
+
+GPT fallback rules
+
+Updated flows
+
+Testing requirements
+
+🎯 TASK STATUS SUMMARY
+Feature	Status
+Sleep flow fixes	✅ Complete
+Exercise skip/text mode rewrite	✅ Complete
+HR normalization fix	✅ Complete
+Food flow skip macros	✅ Complete
+Supabase write validation	✅ Complete
+Callback routing stabilization	✅ Complete
+Deployment	✅ Successful
+QA	⏳ Next session
+Media ingestion prep	⏳ Build 019
 ---
 
 
