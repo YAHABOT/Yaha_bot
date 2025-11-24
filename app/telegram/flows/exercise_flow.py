@@ -67,6 +67,8 @@ def handle_exercise_callback(chat_id: int | str, callback_data: str, state: Exer
     if callback_data == "ex_cancel":
         return "Okay, cancelled the workout log.", None, None
 
+    # While we're in a text-input step, only respond to the relevant skip buttons.
+    # Any other callback just re-prompts for the same field.
     if step in text_steps:
         if callback_data == "ex_skip_dist" and step == "ask_distance":
             state["step"] = "ask_calories"
@@ -113,7 +115,8 @@ def handle_exercise_callback(chat_id: int | str, callback_data: str, state: Exer
             text_out, reply_markup = _build_preview(data)
             return text_out, reply_markup, state
 
-        prompt_reminders = {
+        # Any other callback during a text step just repeats the relevant prompt.
+        prompt_reminders: Dict[str, Tuple[str, Optional[Dict[str, Any]]]] = {
             "ask_duration": (
                 "How long did you go for? (minutes)",
                 None,
@@ -220,7 +223,7 @@ def handle_exercise_text(chat_id: int | str, text: str, state: ExerciseState) ->
             state,
         )
 
-    # 2) Distance
+    # 2) Distance (soft: if unparsable, just move on without setting)
     if step == "ask_distance":
         normalized = normalize_input(text, "exercise_stats")
         val = normalized.get("distance") if normalized else None
@@ -240,7 +243,7 @@ def handle_exercise_text(chat_id: int | str, text: str, state: ExerciseState) ->
             state,
         )
 
-    # 3) Calories
+    # 3) Calories (soft: if unparsable, just move on without setting)
     if step == "ask_calories":
         normalized = normalize_input(text, "exercise_stats")
         val = normalized.get("calories") if normalized else None
@@ -260,7 +263,7 @@ def handle_exercise_text(chat_id: int | str, text: str, state: ExerciseState) ->
             state,
         )
 
-    # 4) Avg HR
+    # 4) Avg HR (strict: must parse or re-prompt, unless user taps Skip)
     if step == "ask_avg_hr":
         normalized = normalize_input(text, "exercise_stats")
         val = normalized.get("heart_rate") if normalized else None
@@ -270,9 +273,14 @@ def handle_exercise_text(chat_id: int | str, text: str, state: ExerciseState) ->
             except ValueError:
                 val = None
 
-        if val is not None:
-            data["avg_hr"] = val
+        if val is None:
+            return (
+                "Please enter average heart rate as a number (e.g. 154), or tap Skip.",
+                {"inline_keyboard": [[{"text": "Skip ⏩", "callback_data": "ex_skip_avg_hr"}]]},
+                state,
+            )
 
+        data["avg_hr"] = val
         state["step"] = "ask_max_hr"
         return (
             "Max Heart Rate?\nOr tap Skip.",
@@ -280,7 +288,7 @@ def handle_exercise_text(chat_id: int | str, text: str, state: ExerciseState) ->
             state,
         )
 
-    # 5) Max HR
+    # 5) Max HR (strict: must parse or re-prompt, unless user taps Skip)
     if step == "ask_max_hr":
         normalized = normalize_input(text, "exercise_stats")
         val = normalized.get("heart_rate") if normalized else None
@@ -290,9 +298,14 @@ def handle_exercise_text(chat_id: int | str, text: str, state: ExerciseState) ->
             except ValueError:
                 val = None
 
-        if val is not None:
-            data["max_hr"] = val
+        if val is None:
+            return (
+                "Please enter max heart rate as a number (e.g. 176), or tap Skip.",
+                {"inline_keyboard": [[{"text": "Skip ⏩", "callback_data": "ex_skip_max_hr"}]]},
+                state,
+            )
 
+        data["max_hr"] = val
         state["step"] = "ask_intensity"
         return (
             "Training Intensity (1–10)?",
