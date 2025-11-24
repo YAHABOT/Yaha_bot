@@ -24,9 +24,8 @@ from app.telegram.ux import build_main_menu
 def _parse_hhmm(value: Any) -> Optional[time]:
     """Parse a simple 'HH:MM' string into a time object.
 
-    We keep this intentionally strict so that only already-normalized
-    values (e.g. from the GPT fallback) are converted. If parsing fails,
-    we return None and let the raw value pass through.
+    This expects already-normalized values coming from the GPT fallback.
+    If parsing fails, we return None and let the existing value pass through.
     """
     if not isinstance(value, str):
         return None
@@ -43,18 +42,16 @@ def _parse_hhmm(value: Any) -> Optional[time]:
 
 
 def _attach_sleep_timestamps(record: Dict[str, Any]) -> Dict[str, Any]:
-    """Attach proper timestamptz values for sleep_start / sleep_end.
+    """Normalize sleep_start / sleep_end into proper timestamptz values.
 
-    - Input values are expected to be 'HH:MM' strings (already normalized
-      by the GPT fallback in the sleep flow).
-    - We anchor the window to *today* for sleep_end.
-    - If both times are present and sleep_start > sleep_end, we assume
-      the sleep started *yesterday* (cross-midnight window).
+    Input values are expected to be 'HH:MM' strings (or left untouched if
+    GPT normalization was skipped). We anchor the window to *today* for
+    sleep_end. If both times exist and start > end we assume the sleep
+    started yesterday (cross-midnight window) – Option B in the spec.
     """
     start_raw = record.get("sleep_start")
     end_raw = record.get("sleep_end")
 
-    # Nothing to normalize
     if not start_raw and not end_raw:
         return record
 
@@ -63,8 +60,8 @@ def _attach_sleep_timestamps(record: Dict[str, Any]) -> Dict[str, Any]:
     start_time = _parse_hhmm(start_raw)
     end_time = _parse_hhmm(end_raw)
 
-    # If we still cannot parse either, leave record untouched
     if start_time is None and end_time is None:
+        # Nothing we can safely normalize
         return record
 
     end_dt = None
@@ -73,7 +70,7 @@ def _attach_sleep_timestamps(record: Dict[str, Any]) -> Dict[str, Any]:
 
     start_date = today
     if start_time is not None and end_time is not None and start_time > end_time:
-        # Option B: if start > end → start is yesterday
+        # Cross-midnight sleep: start is yesterday
         start_date = today - timedelta(days=1)
 
     start_dt = None
@@ -88,12 +85,8 @@ def _attach_sleep_timestamps(record: Dict[str, Any]) -> Dict[str, Any]:
     return record
 
 
-def handle_callback(update: Dict[str, Any]) -> None:
-    """
-    Entry point for all Telegram callback queries.
-    Decides which flow to route to and handles final writes.
-    """
-    callback = update.get("callback_query") or {}
+def handle_callback(callback: Dict[str, Any]) -> None:
+    """Central router for all inline button callback queries."""
     callback_id = callback.get("id")
     message = callback.get("message") or {}
     chat = message.get("chat") or {}
@@ -110,29 +103,75 @@ def handle_callback(update: Dict[str, Any]) -> None:
         answer_callback_query(callback_id)
         return
 
-    # Fetch current state (may be None)
-    state = get_state(chat_id) or {}
+    # 2) Start flows from menu / guidance buttons
+    if data in {"log_food", "start_food"}:
+        reply_text, reply_markup, new_state = start_food_flow(chat_id)
+        set_state(chat_id, new_state)
+        send_message(chat_id, reply_text, reply_markup=reply_markup)
+        answer_callback_query(callback_id)
+        return
 
-    # =========================
-    # SLEEP FLOW
-    # =========================
+    if data in {"log_sleep", "start_sleep"}:
+        reply_text, reply_markup, new_state = start_sleep_flow(chat_id)
+        set_state(chat_id, new_state)
+        send_message(chat_id, reply_text, reply_markup=reply_markup)
+        answer_callback_query(callback_id)
+        return
+
+    if data in {"log_exercise", "start_exercise"}:
+        reply_text, reply_markup, new_state = start_exercise_flow(chat_id)
+        set_state(chat_id, new_state)
+        send_message(chat_id, reply_text, reply_markup=reply_markup)
+        answer_callback_query(callback_id)
+        return
+
+    # Fetch state once – flows below rely on it.
+    state = get_state(chat_id)
+
+    # 3) Food flow callbacks
+    if (state and state.get("flow") == "food") or data.startswith("food_"):
+        reply_text, reply_markup, new_state = handle_food_callback(chat_id, data, state)
+
+        if state and state.get("step") == "preview" and data == "food_confirm":
+            final_state = new_state or state
+            food_data = final_state.get("data") or {}
+            record = dict(food_data)
+            record["chat_id"] = str(chat_id)
+            record["date"] = datetime.now(timezone.utc).date().isoformat()
+
+            success, error = insert_record("food", record)
+            if not success:
+                send_message(chat_id, f"❌ Could not log your meal.\n{error}")
+                clear_state(chat_id)
+                answer_callback_query(callback_id)
+                return
+
+            clear_state(chat_id)
+            send_message(chat_id, "✅ Meal logged successfully.")
+            answer_callback_query(callback_id)
+            return
+
+        if new_state is None:
+            clear_state(chat_id)
+        else:
+            set_state(chat_id, new_state)
+
+        send_message(chat_id, reply_text, reply_markup=reply_markup)
+        answer_callback_query(callback_id)
+        return
+
+    # 4) Sleep flow callbacks
     if (state and state.get("flow") == "sleep") or data.startswith("sleep_"):
         reply_text, reply_markup, new_state = handle_sleep_callback(chat_id, data, state)
 
-        # Final confirmation – write to Supabase
         if state and state.get("step") == "preview" and data == "sleep_confirm":
             final_state = new_state or state
             sleep_data = final_state.get("data") or {}
-
-            record: Dict[str, Any] = dict(sleep_data)
+            record = dict(sleep_data)
             record["chat_id"] = str(chat_id)
             record["date"] = datetime.now(timezone.utc).date().isoformat()
 
             # Normalize sleep_start / sleep_end into proper timestamptz values
-            # before sending to Supabase. This ensures that any GPT-normalized
-            # 'HH:MM' values are converted into full ISO timestamps and avoids
-            # the "invalid input syntax for type timestamp with time zone"
-            # error from Supabase.
             record = _attach_sleep_timestamps(record)
 
             success, error = insert_record("sleep", record)
@@ -156,33 +195,26 @@ def handle_callback(update: Dict[str, Any]) -> None:
         answer_callback_query(callback_id)
         return
 
-    # =========================
-    # EXERCISE FLOW
-    # =========================
-    if (state and state.get("flow") == "exercise") or data.startswith("exercise_"):
+    # 5) Exercise flow callbacks
+    if (state and state.get("flow") == "exercise") or data.startswith("ex_"):
         reply_text, reply_markup, new_state = handle_exercise_callback(chat_id, data, state)
 
-        if (
-            state
-            and state.get("step") == "preview"
-            and data == "exercise_confirm"
-        ):
+        if state and state.get("step") == "preview" and data == "ex_confirm":
             final_state = new_state or state
-            exercise_data = final_state.get("data") or {}
-
-            record: Dict[str, Any] = dict(exercise_data)
+            ex_data = final_state.get("data") or {}
+            record = dict(ex_data)
             record["chat_id"] = str(chat_id)
             record["date"] = datetime.now(timezone.utc).date().isoformat()
 
             success, error = insert_record("exercise", record)
             if not success:
-                send_message(chat_id, f"❌ Could not log exercise.\n{error}")
+                send_message(chat_id, f"❌ Could not log workout.\n{error}")
                 clear_state(chat_id)
                 answer_callback_query(callback_id)
                 return
 
             clear_state(chat_id)
-            send_message(chat_id, "✅ Exercise logged successfully.")
+            send_message(chat_id, "✅ Workout logged successfully.")
             answer_callback_query(callback_id)
             return
 
@@ -195,65 +227,5 @@ def handle_callback(update: Dict[str, Any]) -> None:
         answer_callback_query(callback_id)
         return
 
-    # =========================
-    # FOOD FLOW
-    # =========================
-    if (state and state.get("flow") == "food") or data.startswith("food_"):
-        reply_text, reply_markup, new_state = handle_food_callback(chat_id, data, state)
-
-        if state and state.get("step") == "preview" and data == "food_confirm":
-            final_state = new_state or state
-            food_data = final_state.get("data") or {}
-
-            record: Dict[str, Any] = dict(food_data)
-            record["chat_id"] = str(chat_id)
-            record["date"] = datetime.now(timezone.utc).date().isoformat()
-
-            success, error = insert_record("food", record)
-            if not success:
-                send_message(chat_id, f"❌ Could not log food.\n{error}")
-                clear_state(chat_id)
-                answer_callback_query(callback_id)
-                return
-
-            clear_state(chat_id)
-            send_message(chat_id, "✅ Food logged successfully.")
-            answer_callback_query(callback_id)
-            return
-
-        if new_state is None:
-            clear_state(chat_id)
-        else:
-            set_state(chat_id, new_state)
-
-        send_message(chat_id, reply_text, reply_markup=reply_markup)
-        answer_callback_query(callback_id)
-        return
-
-    # =========================
-    # ENTRY POINTS FOR FLOWS
-    # (when user taps menu buttons)
-    # =========================
-    if data == "log_sleep":
-        text, reply_markup, new_state = start_sleep_flow(chat_id)
-        set_state(chat_id, new_state)
-        send_message(chat_id, text, reply_markup=reply_markup)
-        answer_callback_query(callback_id)
-        return
-
-    if data == "log_exercise":
-        text, reply_markup, new_state = start_exercise_flow(chat_id)
-        set_state(chat_id, new_state)
-        send_message(chat_id, text, reply_markup=reply_markup)
-        answer_callback_query(callback_id)
-        return
-
-    if data == "log_food":
-        text, reply_markup, new_state = start_food_flow(chat_id)
-        set_state(chat_id, new_state)
-        send_message(chat_id, text, reply_markup=reply_markup)
-        answer_callback_query(callback_id)
-        return
-
-    # 6) Fallback – just close the spinner if nothing matched
+    # 6) Fallback – just close the spinner
     answer_callback_query(callback_id)
