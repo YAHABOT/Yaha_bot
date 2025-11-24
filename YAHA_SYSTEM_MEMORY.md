@@ -1153,6 +1153,38 @@ Status
 No validation done.
 Next step: manual functional tests inside Telegram.
 
+📄 BUILD 018 — QA SHEET (ENTRY #1)
+Test: Sleep Flow — messy time input + GPT fallback → Supabase write
+
+Result: ❌ FAIL
+
+Bug Description:
+GPT fallback correctly normalizes input times (10:45pm → 22:45, 5:53 → 05:53), preview uses normalized values, but the Supabase insert receives invalid timestamp string "05:53".
+
+Cause:
+Normalized values are not passed to Supabase. The final write still uses raw or partially normalized user input. Missing conversion to full ISO timestamp.
+
+Expected Behavior:
+When the user confirms the sleep log:
+
+sleep_start and sleep_end MUST be inserted as full ISO timestamps.
+Example: "2025-11-25 05:53:00+00"
+
+Fix Required:
+
+In final confirmation handler, replace raw values with GPT-normalized fields.
+
+Ensure fallback engine outputs ISO8601 full timestamps, not just HH:MM.
+
+Optionally include auto-date inference (today or yesterday depending on window).
+
+Affected Files:
+
+/app/flows/sleep_flow.py
+
+/app/gpt_fallback.py
+
+/app/callbacks.py (depending on where final Supabase write occurs)
 ---
 
 
