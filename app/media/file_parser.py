@@ -1,20 +1,39 @@
 """
 File parser for text-based documents (TXT, CSV, simple PDFs)
 
-Build 019.1:
-- Only signatures + docstrings.
+Build 019.2:
+- Mock file parsing implementation.
+- Real parsing added in Build 019.5.
 """
 
 from typing import Optional
 
 
-def parse_file(file_bytes: bytes, filename: str) -> Optional[str]:
+def parse_file(file_bytes: bytes, filename: str, fail: bool = False) -> Optional[str]:
     """
-    Extract text from a document.
+    Mock file parser.
 
-    Build 019.1: Stub only.
+    Args:
+        file_bytes (bytes): File content.
+        filename (str): Original filename.
+        fail (bool): Simulate parsing failure.
 
     Returns:
-        Optional[str]: Extracted text or None.
+        Optional[str]: Mock extracted content.
     """
-    raise NotImplementedError("parse_file() will be implemented in Build 019.5.")
+
+    if fail:
+        return None
+
+    # Example mock text based on filename
+    if filename.lower().endswith(".csv"):
+        return (
+            "meal,calories,protein,carbs,fat\n"
+            "salmon_poke,540,38,48,20"
+        )
+
+    if filename.lower().endswith(".txt"):
+        return "Dinner: tofu stir fry 420 kcal protein 32g carbs 40g fat 12g"
+
+    # Generic fallback
+    return "Unknown document format but here is some sample extracted text."
