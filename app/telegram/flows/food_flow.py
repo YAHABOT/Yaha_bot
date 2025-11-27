@@ -106,7 +106,29 @@ def handle_food_callback(chat_id: int | str, callback_data: str, state: FoodStat
     if step == "await_fat" and callback_data == "food_skip_fat":
         data["fat_g"] = None
         state["step"] = "await_fiber"
-        return "Fibre in grams? (optional, or type `skip`)", None, state
+        return (
+            "Fibre in grams?\nOr tap Skip.",
+            {"inline_keyboard": [[{"text": "Skip", "callback_data": "food_skip_fiber"}]]},
+            state,
+        )
+
+    # NEW: Fibre skip support
+    if step == "await_fiber" and callback_data == "food_skip_fiber":
+        data["fiber_g"] = None
+        state["step"] = "ask_notes_choice"
+        return (
+            "Add notes?",
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "Yes ✍️", "callback_data": "food_notes_yes"},
+                        {"text": "Skip", "callback_data": "food_notes_no"},
+                    ],
+                    [{"text": "Cancel ❌", "callback_data": "food_cancel"}],
+                ]
+            },
+            state,
+        )
 
     # 4) Notes skip
     if step == "ask_notes_choice":
@@ -219,7 +241,11 @@ def handle_food_text(chat_id: int | str, text: str, state: FoodState) -> Reply:
 
         data["fat_g"] = val
         state["step"] = "await_fiber"
-        return "Fibre in grams? (optional, or type `skip`)", None, state
+        return (
+            "Fibre in grams?\nOr tap Skip.",
+            {"inline_keyboard": [[{"text": "Skip", "callback_data": "food_skip_fiber"}]]},
+            state,
+        )
 
     # 6) Fibre
     if step == "await_fiber":
@@ -232,7 +258,7 @@ def handle_food_text(chat_id: int | str, text: str, state: FoodState) -> Reply:
                 try:
                     val = float(text.strip())
                 except ValueError:
-                    return "Please enter fibre as a number or type `skip`.", None, state
+                    return "Please enter fibre as a number or tap Skip.", None, state
             data["fiber_g"] = val
 
         state["step"] = "ask_notes_choice"
