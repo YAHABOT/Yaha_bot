@@ -1,21 +1,35 @@
 """
 OCR module (Image → Text)
 
-Build 019.1:
-- Define function signatures.
-- No actual OCR implementation.
+Build 019.2:
+- Mock OCR implementation.
+- Deterministic output for testing.
+- Real OCR added in Build 019.5.
 """
 
 from typing import Optional
 
 
-def perform_ocr(image_bytes: bytes) -> Optional[str]:
+def perform_ocr(image_bytes: bytes, fail: bool = False) -> Optional[str]:
     """
-    Perform OCR on an image and extract text.
+    Mock OCR for Build 019.2.
 
-    Build 019.1: Stub only.
+    Args:
+        image_bytes (bytes): Raw image bytes (unused in mock).
+        fail (bool): If True → simulate OCR failure.
 
     Returns:
-        Optional[str]: Extracted text or None on failure.
+        Optional[str]: Simulated extracted text.
     """
-    raise NotImplementedError("perform_ocr() will be implemented in Build 019.5.")
+
+    if fail:
+        return None
+
+    # Deterministic mock text (pretend OCR result)
+    return (
+        "Meal: Chicken rice bowl\n"
+        "Calories: 620 kcal\n"
+        "Protein: 42g\n"
+        "Carbs: 55g\n"
+        "Fat: 18g\n"
+    )
