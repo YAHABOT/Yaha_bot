@@ -1332,6 +1332,85 @@ Callback routing stabilization	✅ Complete
 Deployment	✅ Successful
 QA	⏳ Next session
 Media ingestion prep	⏳ Build 019
+✅ CHANGELOG — BUILD 018.3 → 018.3.1 (FINAL)
+
+(Food Flow QA Completion + Patch Fixes)
+
+Build 018.3 — Full Food Flow QA
+
+Completed a full 18-test QA sweep validating all branches of the Food Flow:
+
+Full macros
+
+Partial macros
+
+Calories-only
+
+Messy / natural language inputs
+
+GPT fallback normalization
+
+Skip logic
+
+Notes flow
+
+Preview formatting
+
+Supabase write validation
+
+Result: All test cases passed successfully.
+Outcome: Food Flow logic confirmed stable and production-ready.
+
+Build 018.3.1 — Food Flow Patch (Post-QA Adjustments)
+
+QA revealed two UX inconsistencies which were corrected, plus a preview logic refinement:
+
+1. Fibre Step Updated
+
+Removed legacy “type skip” instruction.
+
+Added consistent SKIP button (food_skip_fiber) matching protein / carbs / fat.
+
+Implemented full callback handler for the skip action.
+
+Aligned fibre with modern optional-macro UX.
+
+2. Calories Skip Removed (Correct Behavior)
+
+Calories is a required field.
+
+Skip button removed to prevent silent null insertions.
+
+3. Preview Logic Refined
+
+Preview is now skipped entirely when input is fully structured & unambiguous:
+
+meal name
+
+calories
+
+protein, carbs, fat (and fibre if provided)
+
+Preview still appears when:
+
+macros are missing
+
+fallback was triggered
+
+input was messy
+
+user explicitly entered data step-by-step
+
+notes step is involved
+
+4. File Updated
+
+Updated entire food_flow.py to include fibre skip, callback support, UI consistency, and message corrections.
+
+Status
+
+Food Flow (Build 018.x) is now fully complete, stable, and verified.
+No further changes required before proceeding to Build 019.
 ---
 
 
